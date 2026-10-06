@@ -1,0 +1,102 @@
+import { NextRequest, NextResponse } from "next/server";
+import { requireApiContext } from "@/lib/api-context";
+import { matchBankStatementLineSchema, ignoreBankStatementLineSchema } from "@/lib/validation";
+import {
+  matchBankStatementLine,
+  unmatchBankStatementLine,
+  postBankStatementLineAdjustment,
+  unpostBankStatementLineAdjustment,
+  ignoreBankStatementLine,
+  unignoreBankStatementLine,
+  deleteBankStatementLine,
+  BankReconciliationError,
+} from "@/lib/bank-reconciliation";
+
+// One dispatch endpoint for every action a statement line can take, rather
+// than six near-identical route files – each action is a single, cheap
+// state transition (see src/lib/bank-reconciliation.ts), so the dispatch
+// itself carries no business logic, just routes to the right function.
+const ACTIONS = ["match", "unmatch", "post", "unpost", "ignore", "unignore"] as const;
+type Action = (typeof ACTIONS)[number];
+
+export async function POST(
+  req: NextRequest,
+  props: { params: Promise<{ businessId: string; reconciliationId: string; lineId: string }> }
+) {
+  const params = await props.params;
+  const ctx = await requireApiContext(params.businessId, "bankrecon.manage");
+  if (ctx instanceof NextResponse) return ctx;
+
+  const body = await req.json();
+  const action = body?.action as Action | undefined;
+  if (!action || !ACTIONS.includes(action)) {
+    return NextResponse.json({ error: "validation_error", message: `action must be one of: ${ACTIONS.join(", ")}` }, { status: 400 });
+  }
+
+  try {
+    switch (action) {
+      case "match": {
+        const parsed = matchBankStatementLineSchema.safeParse(body);
+        if (!parsed.success) return NextResponse.json({ error: "validation_error", details: parsed.error.flatten() }, { status: 400 });
+        const line = await matchBankStatementLine({
+          businessId: params.businessId,
+          lineId: params.lineId,
+          transactionId: parsed.data.transactionId,
+          matchedById: ctx.userId,
+        });
+        return NextResponse.json({ line });
+      }
+      case "unmatch": {
+        const line = await unmatchBankStatementLine({ businessId: params.businessId, lineId: params.lineId, unmatchedById: ctx.userId });
+        return NextResponse.json({ line });
+      }
+      case "post": {
+        const line = await postBankStatementLineAdjustment({ businessId: params.businessId, lineId: params.lineId, postedById: ctx.userId });
+        return NextResponse.json({ line });
+      }
+      case "unpost": {
+        const line = await unpostBankStatementLineAdjustment({ businessId: params.businessId, lineId: params.lineId, unpostedById: ctx.userId });
+        return NextResponse.json({ line });
+      }
+      case "ignore": {
+        const parsed = ignoreBankStatementLineSchema.safeParse(body);
+        if (!parsed.success) return NextResponse.json({ error: "validation_error", details: parsed.error.flatten() }, { status: 400 });
+        const line = await ignoreBankStatementLine({
+          businessId: params.businessId,
+          lineId: params.lineId,
+          reason: parsed.data.reason,
+          ignoredById: ctx.userId,
+        });
+        return NextResponse.json({ line });
+      }
+      case "unignore": {
+        const line = await unignoreBankStatementLine({ businessId: params.businessId, lineId: params.lineId, unignoredById: ctx.userId });
+        return NextResponse.json({ line });
+      }
+    }
+  } catch (err) {
+    if (err instanceof BankReconciliationError) {
+      return NextResponse.json({ error: "bank_reconciliation_error", message: err.message }, { status: 400 });
+    }
+    throw err;
+  }
+}
+
+export async function DELETE(
+  _req: Request,
+  props: { params: Promise<{ businessId: string; reconciliationId: string; lineId: string }> }
+) {
+  const params = await props.params;
+  const ctx = await requireApiContext(params.businessId, "bankrecon.manage");
+  if (ctx instanceof NextResponse) return ctx;
+
+  try {
+    await deleteBankStatementLine({ businessId: params.businessId, lineId: params.lineId, deletedById: ctx.userId });
+    return NextResponse.json({ ok: true });
+  } catch (err) {
+    if (err instanceof BankReconciliationError) {
+      return NextResponse.json({ error: "bank_reconciliation_error", message: err.message }, { status: 400 });
+    }
+    throw err;
+  }
+}

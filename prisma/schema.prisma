@@ -1,0 +1,2867 @@
+// ============================================================================
+// Malawi Business Manager – Foundation Schema (Phase 1, Module 1)
+//
+// Scope of this file: Auth, Users, Businesses (tenants), Role-based access,
+// Subscriptions, and Audit logging. Everything else (Sales, Inventory,
+// Customers, etc.) will be added in later modules and will always carry a
+// `businessId` foreign key so tenant isolation is enforced at the DB level,
+// not just in application code.
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ----------------------------------------------------------------------------
+// USERS & AUTH
+// ----------------------------------------------------------------------------
+
+// A person who can log in. A single person (e.g. an accountant) may belong to
+// multiple businesses, which is why roles live on BusinessMember, not here.
+model User {
+  id                String    @id @default(cuid())
+  name              String
+  email             String    @unique
+  emailVerifiedAt   DateTime?
+  phone             String?   @unique
+  phoneVerifiedAt   DateTime?
+  passwordHash      String
+  twoFactorEnabled  Boolean   @default(false)
+  twoFactorSecret   String?
+  isActive          Boolean   @default(true)
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  memberships       BusinessMember[]
+  verificationTokens VerificationToken[]
+  passwordResetTokens PasswordResetToken[]
+  sessions          Session[]
+  auditLogs         AuditLog[]
+  sentInvitations   BusinessInvitation[]
+  notificationLogs  NotificationLog[]
+
+  @@index([email])
+  @@index([phone])
+}
+
+// Short-lived tokens for email verification / phone verification.
+model VerificationToken {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token     String   @unique
+  type      VerificationType
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([token])
+}
+
+enum VerificationType {
+  EMAIL
+  PHONE
+}
+
+model PasswordResetToken {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token     String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([token])
+}
+
+// Server-side session record (used alongside NextAuth JWT strategy for
+// revocation support – e.g. "log out of all devices").
+model Session {
+  id            String   @id @default(cuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sessionToken  String   @unique
+  activeBusinessId String? // which business context this session is currently scoped to
+  userAgent     String?
+  ipAddress     String?
+  expiresAt     DateTime
+  createdAt     DateTime @default(now())
+
+  @@index([userId])
+}
+
+// ----------------------------------------------------------------------------
+// TENANCY: BUSINESS
+// ----------------------------------------------------------------------------
+
+// The tenant. Every business-scoped table in later modules (Sale, Product,
+// Customer, Expense, etc.) will have `businessId String` + a relation here,
+// and every query in the app MUST filter by businessId – enforced via the
+// `withTenant` helper in src/lib/tenant.ts.
+model Business {
+  id                     String   @id @default(cuid())
+  name                   String
+  ownerName              String
+  phone                  String
+  email                  String
+  businessType           String
+  district               String
+  city                   String
+  physicalAddress        String?
+  taxpayerId             String?  // TIN, optional
+  currency               String   @default("MWK")
+  // 1-12. Set at registration (currently always 1/January – see
+  // src/app/register/page.tsx), and, as of Module 20, editable afterward
+  // from Tax Settings alongside corporateTaxRate: the two are bundled into
+  // one review action for the same reason VAT registration was bundled
+  // into that save in Module 18 – a corporate tax estimate and its
+  // quarterly/annual due dates are meaningless without knowing which
+  // month the fiscal year starts.
+  financialYearStartMonth Int     @default(1)
+  // Module 35: the IANA time zone the business's CALENDAR runs on – what "today",
+  // "this month", a report's last day, a daily sales bucket and a tax due date
+  // mean. A real Postgres default (same reasoning as Module 20's
+  // corporateTaxRate / Module 28's prefixes), so every pre-existing business
+  // becomes Africa/Blantyre the moment the migration runs – no lazy-backfill
+  // branch needed. Validated against SUPPORTED_TIME_ZONES (src/lib/timezone.ts)
+  // on write; read through getBusinessTimeZone() / resolveTimeZone(), which
+  // fall back to the default rather than to the server's clock.
+  timezone               String   @default("Africa/Blantyre")
+  numberOfEmployees      Int?     @default(0)
+  logoUrl                String?
+  salePrefix             String   @default("SALE")
+  nextSaleNumber         Int      @default(1)
+  purchasePrefix         String   @default("PO")
+  nextPurchaseNumber     Int      @default(1)
+  employeeCodePrefix     String   @default("EMP")
+  nextEmployeeNumber     Int      @default(1)
+  journalEntryPrefix     String   @default("JE")
+  nextJournalEntryNumber Int      @default(1)
+  invoicePrefix          String   @default("INV")
+  receiptPrefix          String   @default("RCT")
+  quotationPrefix        String   @default("QUO")
+  nextInvoiceNumber      Int      @default(1)
+  nextReceiptNumber      Int      @default(1)
+  nextQuotationNumber    Int      @default(1)
+  refundPrefix           String   @default("RFD")
+  nextRefundNumber       Int      @default(1)
+  // Module 28: real Postgres defaults, same "no lazy-backfill branch
+  // needed" reasoning Module 20's corporateTaxRate note explains – every
+  // pre-existing business row gets these the moment the migration runs.
+  stockTransferPrefix     String  @default("TRF")
+  nextStockTransferNumber Int     @default(1)
+  // Module 33: same real-Postgres-default reasoning as the two above.
+  taxPaymentPrefix        String  @default("TXP")
+  nextTaxPaymentNumber    Int     @default(1)
+  // Module 39: same real-Postgres-default reasoning as the pairs above.
+  fxAdjustmentPrefix      String  @default("FXA")
+  nextFxAdjustmentNumber  Int     @default(1)
+  // Module 41: same real-Postgres-default reasoning as the pairs above.
+  manualJournalPrefix     String  @default("MJ")
+  nextManualJournalNumber Int     @default(1)
+  // Module 43: same real-Postgres-default reasoning as the pairs above.
+  creditNotePrefix        String  @default("CN")
+  nextCreditNoteNumber    Int     @default(1)
+  // Module 44: same real-Postgres-default reasoning as the pairs above.
+  debitNotePrefix         String  @default("DBN")
+  nextDebitNoteNumber     Int     @default(1)
+  // Module 42 (Period Close): the LAST calendar day of the books that is closed, as a bare
+  // "YYYY-MM-DD" string, or null when nothing is closed. A string on purpose, not a DateTime:
+  // it names a calendar day, not an instant, so an Owner changing Business.timezone (Module 35)
+  // can't move it. Nullable with no default (the lazy-backfill rule): every existing business
+  // is "open" the moment the migration runs. Read and written only through
+  // src/lib/period-close.ts; the pure rules live in src/lib/period-lock.ts.
+  booksClosedThrough      String?
+  // Module 51: how many times a COMPLETED Bank Reconciliation or Stock Take
+  // may be reopened before reopenBankReconciliation()/reopenStockTake()
+  // refuse and point at a manual journal instead (see src/lib/reopen-audit.ts).
+  // Was a shared code constant (Module 50's MAX_REOPENS) – closing that
+  // module's own documented limitation, this is now a per-business setting,
+  // same "real Postgres default, no lazy-backfill branch needed" reasoning
+  // as corporateTaxRate (Module 20): every pre-existing business becomes 5
+  // the moment the migration runs. Bounds enforced on write only
+  // (src/lib/validation.ts::businessMaxReopensSchema), not by the column.
+  maxReopens              Int      @default(5)
+  // Module 58: how many days an IN_TRANSIT StockTransfer can sit unconfirmed
+  // before syncStaleTransferAlerts() (src/lib/in-app-notifications.ts) and
+  // the Stock Transfers list/detail pages start calling it stale. Was a
+  // shared code constant (Module 57's STALE_TRANSFER_ALERT_DAYS) – closing
+  // that module's own documented limitation, this is now a per-business
+  // setting, same "real Postgres default, no lazy-backfill branch needed"
+  // reasoning as maxReopens above. Bounds enforced on write only
+  // (src/lib/validation.ts::businessStaleTransferAlertDaysSchema), not by
+  // the column. The "urgent" escalation tier stays a fixed 2x multiple of
+  // this value (src/lib/stale-transfer.ts::staleTransferUrgentDays()) rather
+  // than a second configurable number – not built ahead of an actual need.
+  staleTransferAlertDays  Int      @default(3)
+  // Module 80: how many days a service's leftover in Service Cost Clearing (account 1210) can sit untouched
+  // before the bell calls it aged (src/lib/service-cost-clearing.ts). A real Postgres default, so no lazy
+  // backfill branch is needed (same reasoning as maxReopens/staleTransferAlertDays). Bounds are enforced on
+  // write only (validation.ts::businessServiceCostAlertDaysSchema). The URGENT tier is a fixed 2x multiple.
+  serviceCostAlertDays    Int      @default(30)
+  // Module 18 (VAT): off by default – most Malawian SMEs fall under the MRA
+  // VAT registration turnover threshold and shouldn't see VAT math at all.
+  // Flipping this on is what makes Sales/Purchases/Quotations start
+  // computing VAT per line; see src/lib/vat.ts.
+  vatRegistered          Boolean  @default(false)
+  vatNumber              String?  // MRA VAT registration number, distinct from taxpayerId (TIN)
+  isActive               Boolean  @default(true)
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  members       BusinessMember[]
+  branches      Branch[]
+  subscription  Subscription?
+  gatewayPayments GatewayPayment[]
+  gatewayConfig   BusinessGatewayConfig?
+  salePayLinks    SalePayLink[]
+  invoicePayments InvoicePayment[]
+  auditLogs     AuditLog[]
+  categories    Category[]
+  products      Product[]
+  inventoryMovements InventoryMovement[]
+  customers     Customer[]
+  sales         Sale[]
+  payments      Payment[]
+  receipts      Receipt[]
+  invoices      Invoice[]
+  quotations    Quotation[]
+  expenses      Expense[]
+  suppliers     Supplier[]
+  purchases     Purchase[]
+  refunds          Refund[]
+  creditRedemptions CreditRedemption[]
+  cashAccounts     CashAccount[]
+  cashTransactions CashTransaction[]
+  employees        Employee[]
+  taxConfiguration TaxConfiguration?
+  payrollRuns      Payroll[]
+  accounts         Account[]
+  journalEntries   JournalEntry[]
+  aiAnalyses       AIAnalysis[]
+  invitations      BusinessInvitation[]
+  fixedAssets      FixedAsset[]
+  bankReconciliations BankReconciliation[]
+  bankStatementLines  BankStatementLine[]
+  stockTakes          StockTake[]
+  stockTakeLines      StockTakeLine[]
+  notificationLogs    NotificationLog[]
+  inAppNotifications  InAppNotification[]
+  stockLevels         StockLevel[]
+  stockTransfers      StockTransfer[]
+  taxPayments         TaxPayment[]
+  fxAdjustments       ForeignExchangeAdjustment[]
+  manualJournals      ManualJournal[]
+  creditNotes         CreditNote[]
+  supplierDebitNotes  SupplierDebitNote[]
+  serviceCostSettlements ServiceCostSettlement[]
+
+  @@index([email])
+}
+
+// One physical location under a business. Even single-location businesses
+// get a default "Head Office" branch created at registration, so later
+// modules never have to special-case "no branch".
+model Branch {
+  id         String   @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  name       String
+  isHeadOffice Boolean @default(false)
+  district   String?
+  city       String?
+  address    String?
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  sales      Sale[]
+  expenses   Expense[]
+  quotations Quotation[]
+  invitations BusinessInvitation[]
+  members     BusinessMember[]
+  fixedAssets FixedAsset[]
+  // Module 27: extends the branch attribution already established for
+  // Sale/Expense/Quotation/FixedAsset to Purchase and CashTransaction – see
+  // the comments on those models for what this does and deliberately does
+  // NOT cover (Product/inventory stays business-wide; see Product's comment).
+  purchases        Purchase[]
+  cashTransactions CashTransaction[]
+  // Module 28: a branch's own slice of per-product stock, plus the two
+  // ends of any transfer it was party to. See StockLevel/StockTransfer's
+  // comments above.
+  stockLevels          StockLevel[]
+  stockTransfersFrom   StockTransfer[] @relation("StockTransferFrom")
+  stockTransfersTo     StockTransfer[] @relation("StockTransferTo")
+  // Module 31: a stock take opened against this branch's own StockLevel
+  // rows rather than the business-wide catalog – see StockTake.branchId.
+  stockTakes           StockTake[]
+  // Module 29: an employee's home branch, and the branch each of their
+  // payroll runs was attributed to at calculation time (see the comments
+  // on Employee.branchId/Payroll.branchId – the latter is a snapshot, not
+  // a live join, so it doesn't just mirror employees.payrollRuns).
+  employees   Employee[]
+  payrollRuns Payroll[]
+  inventoryMovements   InventoryMovement[]
+  // Module 43: a credit note carries a snapshot of the branch its sale was made at.
+  creditNotes          CreditNote[]
+  // Module 44: a supplier debit note carries a snapshot of the branch its purchase was received at.
+  supplierDebitNotes   SupplierDebitNote[]
+
+  @@index([businessId])
+}
+
+// ----------------------------------------------------------------------------
+// ROLE-BASED ACCESS CONTROL
+// ----------------------------------------------------------------------------
+
+// The join between a User and a Business, carrying their role WITHIN that
+// business. This is what makes multi-business membership possible (e.g. an
+// accountant serving several client businesses) while keeping each
+// membership's permissions independent.
+model BusinessMember {
+  id         String       @id @default(cuid())
+  businessId String
+  business   Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role       BusinessRole
+  branchId   String?      // if set, restricts this member to one branch
+  branch     Branch?      @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  isActive   Boolean      @default(true)
+  invitedAt  DateTime     @default(now())
+  acceptedAt DateTime?
+
+  @@unique([businessId, userId])
+  @@index([businessId])
+  @@index([userId])
+}
+
+// An outstanding invite to join a business. Deliberately separate from
+// BusinessMember (which requires a real User row) so a business can invite
+// someone by email before they have an account – accepting either logs an
+// existing user in or lets a brand-new person set a password, then creates
+// the BusinessMember. See src/lib/team.ts.
+model BusinessInvitation {
+  id              String       @id @default(cuid())
+  businessId      String
+  business        Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  email           String
+  role            BusinessRole
+  branchId        String?
+  branch          Branch?      @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  token           String       @unique
+  invitedByUserId String
+  invitedBy       User         @relation(fields: [invitedByUserId], references: [id])
+  expiresAt       DateTime
+  acceptedAt      DateTime?
+  revokedAt       DateTime?
+  createdAt       DateTime     @default(now())
+
+  @@index([businessId])
+  @@index([token])
+  @@index([email])
+}
+
+// Coarse-grained roles per section 1 of the spec. Fine-grained permission
+// overrides (Enterprise plan: "advanced permissions") are layered on top via
+// the Permission/RolePermission tables below, rather than hard-coding
+// everything into this enum.
+enum BusinessRole {
+  OWNER
+  MANAGER
+  CASHIER
+  ACCOUNTANT
+}
+
+// Individual capability, e.g. "sales.create", "reports.financial.view".
+// Kept as data (not an enum) so Enterprise-tier custom permission sets don't
+// require a code change.
+model Permission {
+  id          String   @id @default(cuid())
+  key         String   @unique // e.g. "reports.financial.view"
+  description String
+
+  rolePermissions RolePermission[]
+}
+
+// Default permission grants per role. A business can add per-member
+// overrides later (Phase 4 / Enterprise); this table defines the baseline.
+model RolePermission {
+  id           String       @id @default(cuid())
+  role         BusinessRole
+  permissionId String
+  permission   Permission   @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([role, permissionId])
+}
+
+// ----------------------------------------------------------------------------
+// SUBSCRIPTIONS
+// ----------------------------------------------------------------------------
+
+model SubscriptionPlan {
+  id              String   @id @default(cuid())
+  key             String   @unique // "FREE" | "BUSINESS" | "PROFESSIONAL" | "ENTERPRISE"
+  name            String
+  monthlyPriceMWK Int      // 0 for FREE, null-equivalent (0) + isCustomPricing for ENTERPRISE
+  annualPriceMWK  Int
+  isCustomPricing Boolean  @default(false)
+  maxUsers        Int?     // null = unlimited
+  maxBranches     Int?     // null = unlimited
+  maxSalesPerMonth Int?    // null = unlimited
+  features        Json     // structured flag map, see src/lib/plans.ts for the typed shape
+  isActive        Boolean  @default(true)
+
+  subscriptions Subscription[]
+}
+
+model Subscription {
+  id              String             @id @default(cuid())
+  businessId      String             @unique
+  business        Business           @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  planId          String
+  plan            SubscriptionPlan   @relation(fields: [planId], references: [id])
+  status          SubscriptionStatus @default(TRIAL)
+  billingCycle    BillingCycle       @default(MONTHLY)
+  trialEndsAt     DateTime?
+  currentPeriodStart DateTime?
+  currentPeriodEnd   DateTime?
+  cancelledAt     DateTime?
+  // Module 74: set only when the subscription was applied by a CONFIRMED gateway payment.
+  // It is what lets a paid period actually lapse (PAST_DUE for a short grace, then EXPIRED)
+  // without breaking the unbilled legacy mode, whose periods never lapsed.
+  requiresPayment Boolean            @default(false)
+  // Module 74: a cancellation of a paid, still-running period keeps access to the end of it.
+  cancelAtPeriodEnd Boolean          @default(false)
+  // Module 74: which renewal reminder (0 none, 1 first, 2 final) was sent for which period end.
+  renewalReminderStage     Int       @default(0)
+  renewalReminderPeriodEnd DateTime?
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  @@index([businessId])
+  @@index([status])
+}
+
+enum SubscriptionStatus {
+  TRIAL
+  ACTIVE
+  PAST_DUE
+  CANCELLED
+  EXPIRED
+}
+
+enum BillingCycle {
+  MONTHLY
+  ANNUAL
+}
+
+// Module 73: one row per attempt to pay for a subscription through a payment gateway
+// (PayChangu hosted checkout: mobile money or card). The row is OURS: `txRef` is generated
+// here, sent to the gateway, and is the only thing the webhook/return page can name.
+// `amount`/`planKey`/`billingCycle` are snapshotted at checkout start so a later price
+// change can't alter what a paid checkout means. `status` only ever moves PENDING ->
+// SUCCEEDED or PENDING -> FAILED, via a conditional update (see gateway-payments.ts).
+// SUCCEEDED means the gateway confirmed the money; `appliedAt` null + `applyError` set
+// means the money arrived but the plan change was refused (needs a person).
+model GatewayPayment {
+  id                String               @id @default(cuid())
+  businessId        String
+  business          Business             @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  subscriptionId    String?
+  provider          String               // "PAYCHANGU"
+  txRef             String               @unique
+  planKey           String
+  billingCycle      BillingCycle
+  amount            Decimal              @db.Decimal(14, 2)
+  currency          String               @default("MWK")
+  status            GatewayPaymentStatus @default(PENDING)
+  checkoutUrl       String?
+  providerReference String?
+  failureReason     String?
+  initiatedById     String
+  createdAt         DateTime             @default(now())
+  completedAt       DateTime?
+  appliedAt         DateTime?
+  applyError        String?
+  // Module 74. `prorationCredit`: value of the unused time on the plan being left, already
+  // taken off `amount` (the amount asked of the gateway). `excessAmount`: what the gateway took
+  // above `amount`. `channel`: how it was paid ("Card", "Mobile Money"...). `lastCheckedAt`
+  // throttles gateway lookups. Refund fields are written by the operator script only.
+  prorationCredit   Decimal              @default(0) @db.Decimal(14, 2)
+  excessAmount      Decimal              @default(0) @db.Decimal(14, 2)
+  channel           String?
+  lastCheckedAt     DateTime?
+  refundedAmount    Decimal              @default(0) @db.Decimal(14, 2)
+  refundedAt        DateTime?
+  refundNote        String?
+
+  @@index([businessId, createdAt])
+  @@index([status])
+}
+
+// Module 74: a business's OWN PayChangu credentials, so customer invoice payments land in the
+// business's wallet, never the platform's. Secrets are AES-256-GCM encrypted (src/lib/secret-box.ts)
+// with APP_ENCRYPTION_KEY and are never returned by any route.
+model BusinessGatewayConfig {
+  id               String   @id @default(cuid())
+  businessId       String   @unique
+  business         Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  provider         String   @default("PAYCHANGU")
+  secretKeyEnc     String
+  webhookSecretEnc String?
+  secretKeyHint    String   // last 4 characters, for display only
+  isActive         Boolean  @default(true)
+  updatedById      String
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+// Module 74: one unguessable pay link per Sale. The token IS the capability: anyone holding it can
+// pay that invoice (and nothing else). Revoking sets revokedAt; the link never exposes more than the
+// invoice number, the business name and the amount due.
+model SalePayLink {
+  id         String    @id @default(cuid())
+  businessId String
+  business   Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  saleId     String    @unique
+  token      String    @unique
+  createdById String
+  createdAt  DateTime  @default(now())
+  revokedAt  DateTime?
+
+  @@index([businessId])
+}
+
+// Module 74: one row per attempt by a customer to pay a Sale online. Same lifecycle and the same
+// "ask the gateway, never believe the caller" rules as GatewayPayment, but verified with the
+// BUSINESS's key and applied as an ordinary customer Payment (cashbook + journal) on success.
+model InvoicePayment {
+  id                String               @id @default(cuid())
+  businessId        String
+  business          Business             @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  saleId            String
+  txRef             String               @unique
+  amount            Decimal              @db.Decimal(14, 2)
+  currency          String               @default("MWK")
+  status            GatewayPaymentStatus @default(PENDING)
+  checkoutUrl       String?
+  providerReference String?
+  channel           String?
+  failureReason     String?
+  payerEmail        String?
+  recordedById      String               // the person who made the pay link: the Payment is booked in their name
+  paymentId         String?              // the ordinary Payment row written on success
+  excessAmount      Decimal              @default(0) @db.Decimal(14, 2)
+  applyError        String?
+  lastCheckedAt     DateTime?
+  refundedAmount    Decimal              @default(0) @db.Decimal(14, 2)
+  refundedAt        DateTime?
+  refundNote        String?
+  createdAt         DateTime             @default(now())
+  completedAt       DateTime?
+  appliedAt         DateTime?
+
+  @@index([businessId, createdAt])
+  @@index([saleId])
+  @@index([status])
+}
+
+enum GatewayPaymentStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+}
+
+// ----------------------------------------------------------------------------
+// AUDIT LOG
+// ----------------------------------------------------------------------------
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  businessId String?
+  business   Business? @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action     String   // e.g. "business.register", "auth.login", "member.role_changed"
+  entityType String?
+  entityId   String?
+  metadata   Json?
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+
+  @@index([businessId])
+  @@index([userId])
+  @@index([action])
+  // Module 52: the reopen-history query (reopen-audit.ts) filters on all
+  // three and is now paginated rather than a single capped read, so it runs
+  // repeatedly per record instead of once – worth a dedicated index.
+  @@index([businessId, entityType, entityId])
+}
+
+// ----------------------------------------------------------------------------
+// PRODUCTS & INVENTORY (Module 2)
+// ----------------------------------------------------------------------------
+
+model Category {
+  id         String   @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  name       String
+  createdAt  DateTime @default(now())
+
+  products   Product[]
+  stockTakes StockTake[]
+
+  // A business shouldn't have two categories with the same name.
+  @@unique([businessId, name])
+  @@index([businessId])
+}
+
+// Module 18 (VAT): STANDARD is taxed at TaxConfiguration.vatStandardRate,
+// ZERO_RATED is taxed at 0% but still a taxable supply (appears on a VAT
+// return, unlike EXEMPT), and EXEMPT is outside the VAT system entirely.
+// Real MRA rules distinguish these for input-VAT reclaim eligibility on
+// exempt supplies – this app doesn't model that distinction yet (see
+// src/lib/vat.ts's KNOWN LIMITATION comment).
+enum VatCategory {
+  STANDARD
+  ZERO_RATED
+  EXEMPT
+}
+
+// ----------------------------------------------------------------------------
+// WITHHOLDING TAX (Module 19) – spec section 19's other named tax, alongside
+// PAYE (Module 10) and VAT (Module 18).
+//
+// Unlike VAT (a tax ON TOP OF a sale price, borne by the customer) or PAYE
+// (deducted from an employee's own salary), withholding tax here is deducted
+// FROM a payment the business itself makes to a payee – the business is the
+// withholding agent, not the taxpayer. That's why this hangs off Expense
+// (Module 4), not Sale or Purchase: a rent payment, a consultant's invoice,
+// or a casual labourer's wages are Expenses, not stock Purchases. See the
+// KNOWN LIMITATION in src/lib/withholding-tax.ts about Purchase (Module 8)
+// deliberately being left out of this module.
+//
+// Categories are the specific payment types Malawi's withholding tax regime
+// singles out – not a general "is this taxable" flag. A category with no
+// rate configured (or one an Owner/Accountant hasn't reviewed) computes 0,
+// exactly like a VAT_CATEGORIES line with vatRegistered=false.
+enum WithholdingTaxCategory {
+  RENT
+  COMMISSION
+  PROFESSIONAL_FEES
+  CONTRACTOR_FEES
+  CASUAL_LABOUR
+  PUBLIC_ENTERTAINMENT_FEE
+}
+
+// Module 28: Product.quantity remains the business-wide running total
+// (unchanged – every existing caller of recordInventoryMovement() keeps
+// working exactly as before). What's new is StockLevel below, a genuinely
+// different shape per Module 27's own note: a per-branch quantity row,
+// populated only for movements that carry a branchId (Purchase, Sale, a
+// stock transfer, or a branch-tagged opening/adjustment). A business that
+// never attributes stock to a branch sees no behavior change at all.
+// KNOWN LIMITATION carried forward, narrowed by Module 53: StockLevel now
+// carries its own optional reorderLevel (see that model below), so a branch
+// CAN have its own threshold – but Product.reorderLevel is still the
+// fallback everywhere no override has been set, and remains the only
+// threshold that matters to a business that never uses branches. StockTake
+// (Module 23) also still reconciles the business-wide total, not a
+// per-branch count – a future module could extend it once StockLevel has
+// been in use long enough to trust as the per-branch source of truth for a
+// physical count to check against.
+model Product {
+  id            String    @id @default(cuid())
+  businessId    String
+  business      Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  categoryId    String?
+  category      Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  supplierId    String?
+  supplier      Supplier? @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  name          String
+  sku           String?
+  barcode       String?
+  description   String?
+  purchasePrice Decimal   @db.Decimal(14, 2)
+  sellingPrice  Decimal   @db.Decimal(14, 2)
+  vatCategory   VatCategory @default(STANDARD) // Module 18 – only matters once Business.vatRegistered is true
+  // Module 77: false = a service (or any item with no physical stock). It can be quoted and sold, but it never
+  // has a quantity, a stock level, a reorder level or a cost of goods sold. Existing rows default to true.
+  isStocked     Boolean   @default(true)
+  quantity      Decimal   @default(0) @db.Decimal(14, 3) // supports fractional units (kg, litres)
+  unit          String    @default("each") // "each", "kg", "litre", "box", etc.
+  reorderLevel  Decimal   @default(0) @db.Decimal(14, 3)
+  expiryDate    DateTime?
+  imageUrl      String?
+  isActive      Boolean   @default(true)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  movements InventoryMovement[]
+  saleItems SaleItem[]
+  purchaseItems PurchaseItem[]
+  quotationItems QuotationItem[]
+  stockTakeLines StockTakeLine[]
+  stockLevels StockLevel[]
+  stockTransferLines StockTransferLine[]
+  serviceCostSettlements ServiceCostSettlement[]
+
+  // SKU/barcode are only unique WITHIN a business, not globally – two
+  // different shops can both use SKU "001".
+  @@unique([businessId, sku])
+  @@unique([businessId, barcode])
+  @@index([businessId])
+  @@index([businessId, quantity]) // supports low-stock / out-of-stock queries
+}
+
+// Append-only ledger of every stock change. Product.quantity is a
+// denormalized running total for fast reads; this table is the source of
+// truth for "why did stock change" and is never edited or deleted, only
+// appended to – mirrors the accounting principle applied later to
+// JournalEntry.
+model InventoryMovement {
+  id          String                @id @default(cuid())
+  businessId  String
+  business    Business              @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  productId   String
+  product     Product               @relation(fields: [productId], references: [id], onDelete: Cascade)
+  type        InventoryMovementType
+  quantity    Decimal               @db.Decimal(14, 3) // positive for stock in, negative for stock out
+  quantityAfter Decimal             @db.Decimal(14, 3) // running balance after this movement, for audit/debugging
+  // Module 28: which branch this movement is attributed to, mirroring
+  // CashTransaction.branchId's treatment in Module 27 – nullable, and never
+  // accepted from a request directly. recordInventoryMovement() sets it
+  // internally from whatever branchId the caller (a Sale, Purchase, or
+  // StockTransfer) already resolved through resolveBranchScope(); a
+  // movement with no branch (adjustment, opening stock, or any sale/
+  // purchase not attributed to a branch) stays null, same as before.
+  branchId    String?
+  branch      Branch?               @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  reason      String?               // free text, e.g. "Damaged in transit"
+  referenceType String?             // e.g. "Sale", "Purchase", "Adjustment" – set by whichever module triggered it
+  referenceId String?               // id of the Sale/Purchase/etc, once those modules exist
+  createdById String                // userId who triggered it (or system, for future automated jobs)
+  createdAt   DateTime              @default(now())
+
+  @@index([businessId])
+  @@index([productId])
+  @@index([branchId])
+  @@index([referenceType, referenceId])
+}
+
+enum InventoryMovementType {
+  PURCHASE       // stock in, from a purchase
+  SALE           // stock out, from a sale
+  ADJUSTMENT     // manual correction, +/-
+  DAMAGED        // stock out, written off
+  RETURN_IN      // stock in, from a sales return
+  RETURN_OUT     // stock out, from a purchase return
+  OPENING_STOCK  // stock in, initial balance when a product is created
+  TRANSFER_OUT   // Module 28: stock out, leaving the source branch of a StockTransfer
+  TRANSFER_IN    // Module 28: stock in, arriving at the destination branch of a StockTransfer
+}
+
+// ----------------------------------------------------------------------------
+// PER-BRANCH STOCK LEVELS & TRANSFERS (Module 28)
+//
+// Closes the KNOWN LIMITATION Module 27 documented on Product: a business
+// with branches had no way to see or move stock between them, because
+// Product.quantity is one business-wide number. StockLevel is additive, not
+// a replacement – Product.quantity keeps being the fast, always-correct
+// business-wide total every existing report/check already relies on.
+// StockLevel answers a narrower, newer question: "of that total, how much
+// is recorded at this specific branch?"
+//
+// A row only exists once stock has actually been attributed to a branch –
+// via a branch-tagged Purchase, Sale, or StockTransfer line. There is no
+// backfill migration that retroactively guesses which branch a business's
+// existing stock sits at; older stock (or stock recorded before this
+// module) simply has no StockLevel row anywhere, which the UI shows as
+// "not yet attributed to a branch" rather than assuming Head Office. This
+// mirrors CashTransaction.branchId's lazy, non-retroactive treatment in
+// Module 27 – see that model's comment for the same reasoning.
+// ----------------------------------------------------------------------------
+
+model StockLevel {
+  id         String   @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  productId  String
+  product    Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  branchId   String
+  branch     Branch   @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  quantity   Decimal  @default(0) @db.Decimal(14, 3)
+  // Module 53: nullable per-branch override of Product.reorderLevel. Null
+  // (the default – every pre-existing row gets this for free, no backfill)
+  // means "no override, keep using the business-wide threshold" – see
+  // resolveEffectiveReorderLevel() in src/lib/inventory.ts, the one place
+  // that decides which of the two numbers actually applies. Setting this
+  // is now the ONLY reason a row might exist with quantity still at 0 (via
+  // setBranchReorderLevel()'s upsert) – a branch a business wants to watch
+  // before any stock has physically moved there yet.
+  reorderLevel Decimal? @db.Decimal(14, 3)
+  updatedAt  DateTime @updatedAt
+
+  // One row per product/branch pair – recordInventoryMovement() upserts
+  // into this, it never creates a second row for the same pair.
+  @@unique([productId, branchId])
+  @@index([businessId])
+  @@index([branchId])
+}
+
+// A movement of stock from one branch to another. Always immediate and
+// fully applied on creation – no PENDING/in-transit state, the same
+// simplicity choice Module 9's transferBetweenAccounts() made for moving
+// cash between accounts. Each line becomes a paired TRANSFER_OUT (at
+// fromBranch) / TRANSFER_IN (at toBranch) InventoryMovement, so the two
+// StockLevel rows and Product.quantity all stay consistent within one
+// database transaction – see src/lib/stock-transfers.ts.
+// Module 55: IN_TRANSIT covers the window between dispatch (stock already
+// left fromBranch) and either RECEIVED (arrived at toBranch) or CANCELLED
+// (never arrived, sent back). Every StockTransfer created before Module 55
+// was immediate and fully-applied the moment it was recorded – both legs
+// already posted – so the real Postgres default below is RECEIVED, not
+// IN_TRANSIT: Postgres backfills every pre-existing row to RECEIVED at
+// migration time (correct, since they already are), while
+// createStockTransfer() explicitly passes IN_TRANSIT for every transfer
+// created from here on. Getting this backfill direction wrong would let an
+// already-fully-applied historic transfer be "received" a second time,
+// double-posting its TRANSFER_IN.
+enum StockTransferStatus {
+  IN_TRANSIT
+  RECEIVED
+  CANCELLED
+}
+
+model StockTransfer {
+  id             String              @id @default(cuid())
+  businessId     String
+  business       Business            @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  fromBranchId   String
+  fromBranch     Branch              @relation("StockTransferFrom", fields: [fromBranchId], references: [id])
+  toBranchId     String
+  toBranch       Branch              @relation("StockTransferTo", fields: [toBranchId], references: [id])
+  transferNumber String
+  notes          String?
+  createdById    String
+  createdAt      DateTime            @default(now())
+  status         StockTransferStatus @default(RECEIVED)
+  // Set together, once, when a destination-branch member confirms the
+  // goods actually arrived – this is what posts TRANSFER_IN.
+  receivedAt     DateTime?
+  receivedById   String?
+  // Set together, once, when a source-branch member cancels a transfer
+  // that never arrived – this is what reverses the original TRANSFER_OUT.
+  // Mutually exclusive with receivedAt: a transfer is received XOR
+  // cancelled, never both (createStockTransfer/receiveStockTransfer/
+  // cancelStockTransfer all gate on status === IN_TRANSIT).
+  cancelledAt    DateTime?
+  cancelledById  String?
+  cancelReason   String?
+
+  lines StockTransferLine[]
+
+  @@unique([businessId, transferNumber])
+  @@index([businessId])
+  @@index([fromBranchId])
+  @@index([toBranchId])
+}
+
+model StockTransferLine {
+  id         String        @id @default(cuid())
+  transferId String
+  transfer   StockTransfer @relation(fields: [transferId], references: [id], onDelete: Cascade)
+  productId  String
+  product    Product       @relation(fields: [productId], references: [id])
+  quantity   Decimal       @db.Decimal(14, 3)
+
+  // MODULE 59 – closes the KNOWN LIMITATION Module 56 documented the moment
+  // in-transit visibility shipped: getInTransitSummary()'s value estimate
+  // used each product's CURRENT purchasePrice because a StockTransferLine
+  // never snapshotted a cost (transfers don't post to the GL, so Module 28
+  // never needed one). Nullable – same snapshot-at-creation pattern as
+  // SaleLine.unitCost/PurchaseLine.unitCost, but existing pre-Module-59 rows
+  // never captured a value and can't be backfilled accurately (the cost at
+  // THEIR dispatch time is lost), so callers fall back to current
+  // purchasePrice only for rows where this is null.
+  unitCostAtDispatch Decimal? @db.Decimal(14, 2)
+
+  // MODULE 65 – closes the KNOWN LIMITATION Module 55 documented ("no
+  // damaged/short-received path"): a receipt was all-or-nothing, so goods
+  // that arrived damaged or short had to be received in full and corrected
+  // afterwards. Set once, at receive time, for every line of a transfer
+  // received from Module 65 on. NULL means "received in full as dispatched":
+  // every transfer received before this module (they could only ever be
+  // received in full), and every transfer still IN_TRANSIT / CANCELLED.
+  // 0 <= quantityReceived <= quantity, enforced in
+  // src/lib/stock-transfer-receipt.ts, not by a database CHECK.
+  quantityReceived Decimal? @db.Decimal(14, 3)
+  // Required (and only stored) when quantityReceived < quantity – why the
+  // difference didn't arrive (damaged in transit, missing from the load...).
+  shortfallReason  String?
+
+  // MODULE 66 – closes the KNOWN LIMITATION Module 65 documented ("a
+  // confirmed shortfall can't be edited/reversed"): stock written off as short
+  // at receipt sometimes turns up afterwards. Running TOTAL brought back so far
+  // (a line can be recovered in several instalments), never more than
+  // quantity - quantityReceived (enforced in src/lib/stock-transfer-recovery.ts,
+  // not by a database CHECK). NULL = nothing recovered yet – every transfer
+  // before this module, every line that arrived in full. Each recovery posts a
+  // TRANSFER_IN at the destination branch and reverses that many units of the
+  // Module 65 write-off at the same cost; the note and per-recovery detail live
+  // in the AuditLog, not in another column.
+  quantityRecovered Decimal? @db.Decimal(14, 3)
+
+  @@index([transferId])
+  @@index([productId])
+}
+
+// ----------------------------------------------------------------------------
+// CUSTOMERS (Module 3 minimal -> expanded in Module 5)
+//
+// Total purchases / amount paid / outstanding balance from spec section 9
+// are deliberately NOT stored columns here – they're always computed live
+// from Sale + Payment (see src/lib/customers.ts::getCustomerSummary). A
+// stored running balance invites drift the moment a sale is voided or a
+// payment is backdated; computing it is one indexed query and is always
+// correct.
+// ----------------------------------------------------------------------------
+
+enum CustomerType {
+  INDIVIDUAL
+  BUSINESS
+}
+
+model Customer {
+  id         String       @id @default(cuid())
+  businessId String
+  business   Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  name       String
+  customerType CustomerType @default(INDIVIDUAL)
+  phone      String?
+  email      String?
+  address    String?
+  creditLimit Decimal @default(0) @db.Decimal(14, 2)
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  sales      Sale[]
+  payments   Payment[]
+  quotations Quotation[]
+  creditRedemptions CreditRedemption[]
+  creditNotes       CreditNote[]
+
+  @@index([businessId])
+}
+
+// ----------------------------------------------------------------------------
+// SALES (Module 3)
+// ----------------------------------------------------------------------------
+
+model Sale {
+  id            String       @id @default(cuid())
+  businessId    String
+  business      Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  branchId      String?
+  branch        Branch?      @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  customerId    String?      // null = walk-in / cash sale with no tracked customer
+  customer      Customer?    @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  saleNumber    String       // human-facing number, e.g. "SALE-000123", unique per business
+  saleDate      DateTime     @default(now())
+  subtotal      Decimal      @db.Decimal(14, 2) // sum of line totals before sale-level discount/tax
+  discount      Decimal      @default(0) @db.Decimal(14, 2)
+  // Module 18 (VAT): this field existed since Module 3 as a manual,
+  // cashier-typed number that never fed into accounting. It's now the
+  // server-computed sum of SaleItem.vatAmount – see src/lib/vat.ts and
+  // src/lib/sales.ts::createSale. Always 0 when the business isn't
+  // vatRegistered.
+  tax           Decimal      @default(0) @db.Decimal(14, 2)
+  total         Decimal      @db.Decimal(14, 2)
+  amountPaid    Decimal      @default(0) @db.Decimal(14, 2)
+  balance       Decimal      @default(0) @db.Decimal(14, 2) // total - amountPaid, kept denormalized for fast debt queries
+  paymentMethod PaymentMethod
+  status        SaleStatus   @default(PAID)
+  // Module 40 (Foreign-Currency Invoices): null = an ordinary kwacha document.
+  // When set, the KWACHA figures above stay the ledger truth; these two record
+  // that the document was agreed in a foreign currency at `exchangeRate`
+  // (kwacha per 1 unit), the BOOK rate later settlements are measured against.
+  // The foreign total/balance are computed (kwacha ÷ rate), never stored.
+  currency      String?
+  exchangeRate  Decimal?     @db.Decimal(14, 4)
+  salespersonId String       // userId who recorded the sale
+  voidedAt      DateTime?
+  voidReason    String?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  items    SaleItem[]
+  payments Payment[]
+  receipt  Receipt?
+  invoice  Invoice?
+  refunds  Refund[]
+  creditRedemptions CreditRedemption[]
+  creditNotes       CreditNote[]
+  convertedFromQuotation Quotation?
+
+  @@unique([businessId, saleNumber])
+  @@index([businessId])
+  @@index([businessId, customerId])
+  @@index([businessId, status])
+  @@index([businessId, saleDate])
+}
+
+enum PaymentMethod {
+  CASH
+  AIRTEL_MONEY
+  TNM_MPAMBA
+  BANK
+  CARD
+  CREDIT
+}
+
+enum SaleStatus {
+  PAID
+  PARTIAL
+  CREDIT
+  VOIDED
+}
+
+model SaleItem {
+  id          String   @id @default(cuid())
+  saleId      String
+  sale        Sale     @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  productId   String
+  product     Product  @relation(fields: [productId], references: [id], onDelete: Restrict)
+  quantity    Decimal  @db.Decimal(14, 3)
+  unitPrice   Decimal  @db.Decimal(14, 2) // snapshot at time of sale – Product.sellingPrice may change later
+  unitCost    Decimal  @db.Decimal(14, 2) // snapshot of Product.purchasePrice at time of sale – needed for accurate gross profit even after purchase prices change later
+  discount    Decimal  @default(0) @db.Decimal(14, 2)
+  total       Decimal  @db.Decimal(14, 2) // (quantity * unitPrice) - discount
+  // Module 18 (VAT): both snapshotted at sale time, same reasoning as
+  // unitCost above – a product's VAT category or the business's VAT rate
+  // may change after this sale, but the sale's own VAT should stay what it
+  // actually was when it happened.
+  vatCategory VatCategory @default(STANDARD)
+  vatAmount   Decimal  @default(0) @db.Decimal(14, 2) // VAT on `total` (the line's own net-of-discount amount), 0 if the business wasn't VAT-registered or this line is ZERO_RATED/EXEMPT
+  creditNoteLines CreditNoteLine[] // Module 43 – what has been credited back against this line so far
+
+  @@index([saleId])
+  @@index([productId])
+}
+
+// A payment against a sale – either taken at the point of sale, or recorded
+// later against an outstanding balance (spec section 9: "record payments
+// against outstanding debts"). Both paths write here, which is what makes
+// the customer debt dashboard (next module) a single query over this table
+// rather than two different code paths to reconcile.
+model Payment {
+  id          String        @id @default(cuid())
+  businessId  String
+  business    Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  saleId      String?
+  sale        Sale?         @relation(fields: [saleId], references: [id], onDelete: SetNull)
+  customerId  String?
+  customer    Customer?     @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  purchaseId  String?
+  purchase    Purchase?     @relation(fields: [purchaseId], references: [id], onDelete: SetNull)
+  supplierId  String?
+  supplier    Supplier?     @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  amount      Decimal       @db.Decimal(14, 2)
+  method      PaymentMethod
+  reference   String?       // mobile money transaction ref, bank slip number, etc.
+  notes       String?
+  recordedById String
+  // Module 40: set only on a settlement of a foreign-currency Sale/Purchase
+  // (src/lib/foreign-settlement.ts). `amount` above stays the KWACHA applied to
+  // the document's balance (foreignAmount x the document's book rate); the cash
+  // that actually moved is foreignAmount x settlementRate, and `fxGainLoss` is
+  // the signed difference from the BUSINESS's point of view (+ gain, - loss).
+  // Cash moved = amount + fxGainLoss when receiving, amount - fxGainLoss when paying.
+  currency       String?
+  foreignAmount  Decimal?       @db.Decimal(14, 2)
+  settlementRate Decimal?       @db.Decimal(14, 4)
+  fxGainLoss     Decimal        @default(0) @db.Decimal(14, 2)
+  createdAt   DateTime      @default(now())
+
+  @@index([businessId])
+  @@index([saleId])
+  @@index([customerId])
+  @@index([purchaseId])
+  @@index([supplierId])
+}
+
+// One receipt per sale. Kept as its own table (rather than deriving the
+// number from Sale) because spec section 25 also wants Invoices, Quotations,
+// etc. as distinct documents later, each with independent numbering – this
+// establishes that pattern now instead of overloading Sale.saleNumber for
+// everything.
+model Receipt {
+  id            String   @id @default(cuid())
+  businessId    String
+  business      Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  saleId        String   @unique
+  sale          Sale     @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  receiptNumber String
+  generatedAt   DateTime @default(now())
+
+  @@unique([businessId, receiptNumber])
+  @@index([businessId])
+}
+
+// ----------------------------------------------------------------------------
+// BUSINESS DOCUMENTS (Module 15) – Invoices & Quotations
+// ----------------------------------------------------------------------------
+
+// A formal, printable/downloadable invoice for a Sale – the sibling document
+// this codebase's `Receipt` comment (Module 3) promised. Deliberately its
+// own table rather than a boolean on Sale: it has its own number sequence
+// (Business.invoicePrefix/nextInvoiceNumber have existed, unused, since
+// Module 1) and its own lifecycle (generated on demand, once, the same
+// lazy-creation pattern Receipt already uses for its number). Any Sale can
+// have an invoice generated for it, not only credit ones – a fully-paid
+// sale might still need one for the customer's own records.
+model Invoice {
+  id            String   @id @default(cuid())
+  businessId    String
+  business      Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  saleId        String   @unique
+  sale          Sale     @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  invoiceNumber String
+  dueDate       DateTime?
+  terms         String?  // free-text payment terms, e.g. "Payment due within 30 days"
+  generatedAt   DateTime @default(now())
+
+  @@unique([businessId, invoiceNumber])
+  @@index([businessId])
+}
+
+// A pre-sale price quote (spec section 25). Deliberately does NOT touch
+// stock or the Cashbook/GL – it's a proposal, not a transaction. Only
+// `convertQuotationToSale()` in src/lib/quotations.ts creates real
+// financial effects, by calling the same `createSale()` used everywhere
+// else, so a converted quotation goes through the exact same
+// totals/stock/receipt/ledger path a manually-entered sale would.
+enum QuotationStatus {
+  DRAFT
+  SENT
+  ACCEPTED
+  DECLINED
+  EXPIRED
+  CONVERTED
+}
+
+model Quotation {
+  id               String          @id @default(cuid())
+  businessId       String
+  business         Business        @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  branchId         String?
+  branch           Branch?         @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  customerId       String?
+  customer         Customer?       @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  customerName     String?         // free-text prospect name when there's no tracked Customer yet
+  quotationNumber  String
+  quotationDate    DateTime        @default(now())
+  expiryDate       DateTime?
+  subtotal         Decimal         @db.Decimal(14, 2)
+  discount         Decimal         @default(0) @db.Decimal(14, 2)
+  tax              Decimal         @default(0) @db.Decimal(14, 2) // Module 18: server-computed from QuotationItem.vatAmount, same as Sale.tax
+  total            Decimal         @db.Decimal(14, 2)
+  // Module 77: set only when converting changed the figures the customer was quoted (a free-text line linked to
+  // a product with a different VAT category, or a VAT rate change since quoting). The quotation then shows what
+  // the sale actually charged; these keep what was quoted so both are visible. Null = nothing changed.
+  quotedTax        Decimal?        @db.Decimal(14, 2)
+  quotedTotal      Decimal?        @db.Decimal(14, 2)
+  status           QuotationStatus @default(DRAFT)
+  notes            String?
+  terms            String?
+  createdById      String
+  convertedSaleId  String?         @unique
+  convertedSale    Sale?           @relation(fields: [convertedSaleId], references: [id], onDelete: SetNull)
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  items QuotationItem[]
+
+  @@unique([businessId, quotationNumber])
+  @@index([businessId])
+  @@index([businessId, status])
+  @@index([businessId, customerId])
+}
+
+model QuotationItem {
+  id          String     @id @default(cuid())
+  quotationId String
+  quotation   Quotation  @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+  productId   String?
+  product     Product?   @relation(fields: [productId], references: [id], onDelete: SetNull)
+  description String     // snapshot of the product name (or free-text item) at quote time
+  quantity    Decimal    @db.Decimal(14, 3)
+  unitPrice   Decimal    @db.Decimal(14, 2)
+  discount    Decimal    @default(0) @db.Decimal(14, 2)
+  total       Decimal    @db.Decimal(14, 2)
+  // Module 18 (VAT): a free-text line (no productId) has no VatCategory to
+  // read, so it defaults to STANDARD for display purposes – this is an
+  // estimate shown on the quotation PDF, not a posted transaction, so it's
+  // corrected automatically once the line is linked to a real product and
+  // the quotation is converted to a Sale (see convertQuotationToSale).
+  vatCategory VatCategory @default(STANDARD)
+  vatAmount   Decimal    @default(0) @db.Decimal(14, 2)
+
+  @@index([quotationId])
+  @@index([productId])
+}
+
+// ----------------------------------------------------------------------------
+// EXPENSES (Module 4)
+// ----------------------------------------------------------------------------
+
+// Fixed category list per spec section 12. Unlike tax rates or subscription
+// plans, these categories aren't something an admin needs to reconfigure
+// per-business, so an enum (fast to group/filter/index) is the right choice
+// here – contrast with Category (Product categories), which IS
+// business-defined and therefore a table, not an enum.
+enum ExpenseCategory {
+  RENT
+  ELECTRICITY
+  WATER
+  INTERNET
+  AIRTIME
+  TRANSPORT
+  SALARIES
+  WAGES
+  FUEL
+  REPAIRS
+  ADVERTISING
+  BANK_CHARGES
+  MOBILE_MONEY_CHARGES
+  PURCHASES
+  OTHER
+}
+
+model Expense {
+  id            String          @id @default(cuid())
+  businessId    String
+  business      Business        @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  branchId      String?
+  branch        Branch?         @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  category      ExpenseCategory
+  description   String
+  amount        Decimal         @db.Decimal(14, 2)
+  expenseDate   DateTime        @default(now())
+  paymentMethod PaymentMethod
+  payee         String?         // "Supplier/payee" per spec – becomes a real Supplier relation once that module lands
+  receiptUrl    String?         // populated once the Storage module (spec section 3) wires up object storage
+  notes         String?
+  recordedById  String
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  // Module 19 (Withholding Tax): optional – most Expenses aren't a
+  // withholding-tax-eligible payment type at all (electricity, airtime,
+  // fuel, ...), so this is null far more often than set. `amount` above
+  // stays the GROSS amount owed to the payee (what the P&L expenses) –
+  // withholdingTaxAmount is snapshotted at creation time (mirrors
+  // SaleItem.vatAmount in Module 18) so a later change to the business's
+  // configured rate never rewrites history. The actual cash that leaves to
+  // the payee is `amount - withholdingTaxAmount`; the withheld portion is
+  // credited to WITHHOLDING_TAX_PAYABLE instead of a cash account – see
+  // src/lib/withholding-tax.ts and src/lib/accounting-integrations.ts.
+  withholdingTaxCategory WithholdingTaxCategory?
+  withholdingTaxRate     Decimal                 @default(0) @db.Decimal(5, 2)
+  withholdingTaxAmount   Decimal                 @default(0) @db.Decimal(14, 2)
+  // The payee's own MRA Taxpayer ID – required on a real WHT certificate
+  // (the payee needs it to claim credit for the tax withheld on their own
+  // return) but distinct from Business.taxpayerId, which is this
+  // business's own TIN. Free-text like `payee` itself, for the same reason
+  // (see the comment on `payee` above).
+  payeeTpin              String?
+
+  @@index([businessId])
+  @@index([businessId, category])
+  @@index([businessId, expenseDate])
+}
+
+// ----------------------------------------------------------------------------
+// SUPPLIERS & PURCHASES (Module 8)
+//
+// Mirrors the Customer/Sale/debt pattern from Modules 3 and 5: Supplier
+// carries no stored balance column (see the Customer model comment for why)
+// – totalPurchases/amountPaid/outstandingBalance are computed live from
+// Purchase in src/lib/suppliers.ts, and a general supplier payment is
+// allocated FIFO across open purchases the same way applyCustomerPayment()
+// works, via applySupplierPayment().
+// ----------------------------------------------------------------------------
+
+model Supplier {
+  id         String   @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  name       String
+  phone      String?
+  email      String?
+  address    String?
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  products  Product[]
+  purchases Purchase[]
+  payments  Payment[]
+  creditRedemptions CreditRedemption[]
+  fixedAssets FixedAsset[]
+  // Module 44: snapshot of Purchase.supplierId at issue time, same reasoning as Sale/CreditNote.
+  supplierDebitNotes SupplierDebitNote[]
+
+  @@index([businessId])
+}
+
+model Purchase {
+  id             String         @id @default(cuid())
+  businessId     String
+  business       Business       @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  // Module 27: which branch received this stock – nullable/lazy-backfill,
+  // same pattern as Sale.branchId/Expense.branchId (Module 13). An
+  // unrestricted Owner/Manager can leave this unset (business-wide, no
+  // branch attributed); a branch-restricted member has it filled in by
+  // resolveBranchScope() same as every other branch-scoped create.
+  branchId       String?
+  branch         Branch?        @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  supplierId     String         // unlike Sale.customerId, always required – spec section 15 lists Supplier as a required purchase field
+  supplier       Supplier       @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  purchaseNumber String
+  purchaseDate   DateTime       @default(now())
+  subtotal       Decimal        @db.Decimal(14, 2)
+  tax            Decimal        @default(0) @db.Decimal(14, 2) // Module 18: server-computed input VAT, sum of PurchaseItem.vatAmount
+  total          Decimal        @db.Decimal(14, 2)
+  amountPaid     Decimal        @default(0) @db.Decimal(14, 2)
+  balance        Decimal        @default(0) @db.Decimal(14, 2)
+  paymentMethod  PaymentMethod
+  status         PurchaseStatus @default(PAID)
+  // Module 40 (Foreign-Currency Invoices): null = an ordinary kwacha document.
+  // When set, the KWACHA figures above stay the ledger truth; these two record
+  // that the document was agreed in a foreign currency at `exchangeRate`
+  // (kwacha per 1 unit), the BOOK rate later settlements are measured against.
+  // The foreign total/balance are computed (kwacha ÷ rate), never stored.
+  currency       String?
+  exchangeRate   Decimal?       @db.Decimal(14, 4)
+  recordedById   String
+  voidedAt       DateTime?
+  voidReason     String?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  items    PurchaseItem[]
+  payments Payment[]
+  refunds  Refund[]
+  creditRedemptions CreditRedemption[]
+  debitNotes SupplierDebitNote[]
+
+  @@unique([businessId, purchaseNumber])
+  @@index([businessId])
+  @@index([businessId, supplierId])
+  @@index([businessId, status])
+  @@index([businessId, branchId])
+}
+
+enum PurchaseStatus {
+  PAID
+  PARTIAL
+  CREDIT
+  VOIDED
+}
+
+model PurchaseItem {
+  id         String   @id @default(cuid())
+  purchaseId String
+  purchase   Purchase @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  productId  String
+  product    Product  @relation(fields: [productId], references: [id], onDelete: Restrict)
+  quantity   Decimal  @db.Decimal(14, 3)
+  unitCost   Decimal  @db.Decimal(14, 2) // actual cost paid this purchase – becomes the product's new purchasePrice (see src/lib/purchases.ts)
+  total      Decimal  @db.Decimal(14, 2)
+  // Module 18 (VAT): input VAT this purchase can reclaim. Simplification
+  // (documented in src/lib/vat.ts): assumes the supplier charged VAT at
+  // this product's own vatCategory rate – it does not model whether the
+  // supplier itself is VAT-registered.
+  vatCategory VatCategory @default(STANDARD)
+  vatAmount  Decimal  @default(0) @db.Decimal(14, 2)
+
+  debitNoteLines SupplierDebitNoteLine[]
+
+  @@index([purchaseId])
+  @@index([productId])
+}
+
+// ----------------------------------------------------------------------------
+// CASHBOOK (Module 9) – spec section 13
+//
+// Replaces the Module 6 dashboard's approximated "channel balance" (derived
+// after the fact from Payment/Expense sums) with a real, purpose-built
+// ledger. Every Payment and Expense creation now posts a CashTransaction
+// here (see src/lib/cashbook.ts::postCashTransactionForPayment and the
+// updated Sales/Purchases/Expenses code) – this table is the source of
+// truth going forward, not a second system computing balances independently.
+//
+// A CashAccount's current balance = openingBalance + sum of its
+// CashTransaction.amount (signed: positive = in, negative = out). Computed
+// on read, same reasoning as Customer/Supplier debt – no stored running
+// balance to drift.
+// ----------------------------------------------------------------------------
+
+enum CashAccountType {
+  CASH
+  BANK
+  AIRTEL_MONEY
+  TNM_MPAMBA
+}
+
+// Module 27: deliberately NOT branch-scoped. A "Cash" drawer or "NBS Bank"
+// account is one real-world pool of money shared by however many branches a
+// business has – splitting its balance per branch would require tracking
+// physical cash transfers between branches this app has no model for, and
+// would misrepresent a single bank account as several. Branch attribution
+// lives one level down, on CashTransaction (see its comment) – you can see
+// which branch's activity moved money through a shared account without the
+// account itself pretending to be several accounts.
+model CashAccount {
+  id             String   @id @default(cuid())
+  businessId     String
+  business       Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  type           CashAccountType
+  name           String   // e.g. "Cash", "NBS Bank", "Airtel Money" – editable, since a business may have >1 bank account
+  openingBalance Decimal  @default(0) @db.Decimal(14, 2)
+  isDefault      Boolean  @default(false) // user-selected auto-post target for this type – kept unique per type by a partial DB index
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  transactions       CashTransaction[] @relation("AccountTransactions")
+  relatedTransactions CashTransaction[] @relation("RelatedAccountTransactions")
+  refunds            Refund[]
+  bankReconciliations BankReconciliation[]
+  bankStatementLines  BankStatementLine[]
+  taxPayments         TaxPayment[]
+  fxAdjustments       ForeignExchangeAdjustment[]
+  creditNotes         CreditNote[]
+  supplierDebitNotes  SupplierDebitNote[]
+
+  // A PostgreSQL partial unique index enforces one default account per
+  // (businessId, type) while allowing any number of non-default accounts.
+  @@index([businessId])
+}
+
+enum CashTransactionType {
+  RECEIPT       // money in – from a Payment on the customer side
+  PAYMENT       // money out – from an Expense or a Payment on the supplier side
+  TRANSFER_IN
+  TRANSFER_OUT
+  ADJUSTMENT    // manual correction, rare – always requires a reason
+}
+
+// Module 27: branchId here is DELIBERATELY separate from the CashAccount
+// itself being branch-scoped – see the comment on CashAccount. A business's
+// bank/mobile-money/cash accounts are shared, fungible pools, not one per
+// branch; what's new is that each individual movement can be attributed to
+// the branch whose activity caused it (which branch's sale/expense/purchase
+// this came from), for branch-filtered cashbook reporting. It is populated
+// automatically inside the relevant postCashTransactionFor*() function
+// (src/lib/cashbook.ts) from the originating record's own branchId – never
+// accepted directly from a request body, the same "never trust the client"
+// posture the rest of this ledger takes with amounts. It stays null for
+// transfers, manual adjustments, bank-reconciliation adjustments, and
+// payroll (Employee has no branchId yet) – none of those are one-branch
+// events, so nothing is guessed for them.
+model CashTransaction {
+  id              String              @id @default(cuid())
+  businessId      String
+  business        Business            @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  accountId       String
+  account         CashAccount         @relation("AccountTransactions", fields: [accountId], references: [id], onDelete: Cascade)
+  branchId        String?
+  branch          Branch?             @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  type            CashTransactionType
+  amount          Decimal             @db.Decimal(14, 2) // signed: positive = in, negative = out
+  balanceAfter    Decimal             @db.Decimal(14, 2) // running balance snapshot, for audit/debugging – mirrors InventoryMovement.quantityAfter
+  relatedAccountId String?            // for transfers, the other account involved
+  relatedAccount  CashAccount?        @relation("RelatedAccountTransactions", fields: [relatedAccountId], references: [id], onDelete: SetNull)
+  referenceType   String?             // "Payment" | "Expense" | "Transfer" | "Adjustment"
+  referenceId     String?
+  description     String?
+  createdById     String
+  createdAt       DateTime            @default(now())
+
+  // Module 22 (Bank Reconciliation): the one BankStatementLine this
+  // transaction has been matched against, if any – see the @@unique on
+  // BankStatementLine.matchedTransactionId, which is what actually
+  // enforces "a book transaction can only be matched once".
+  matchedBankStatementLine BankStatementLine?
+
+  @@index([businessId])
+  @@index([accountId])
+  @@index([referenceType, referenceId])
+  @@index([businessId, branchId])
+}
+
+// ----------------------------------------------------------------------------
+// REFUNDS (Module 16) – spec section 11 (Refunds), closing the gap flagged
+// since Modules 3/8/9/11: voiding a Sale/Purchase restores stock but
+// deliberately never guesses what should happen to cash already collected
+// or paid – that's a distinct decision this module now makes explicit.
+//
+// A Refund can only be issued against a Sale/Purchase that is already
+// VOIDED (see src/lib/refunds.ts) – voiding itself still doesn't touch
+// cash; this is the deliberate, separate step that does. Multiple Refund
+// rows can exist against the same voided document (e.g. half back in cash
+// now, the rest written off later), constrained only by how much was
+// actually paid – see getRefundableAmount() in src/lib/refunds.ts.
+// ----------------------------------------------------------------------------
+
+enum RefundMethod {
+  CASH        // money actually leaves/enters a real CashAccount – reverses both the Cashbook entry and the GL
+  CREDIT_NOTE // no cash moves yet; recorded as a balance owed to/from the customer or supplier for a future module to let them redeem against a later sale/purchase – see the KNOWN LIMITATION in src/lib/refunds.ts
+  WRITE_OFF   // a deliberate decision that nothing is owed either way (e.g. the void was a pure data-entry correction) – no further cash or GL impact beyond what voiding already did
+}
+
+model Refund {
+  id            String        @id @default(cuid())
+  businessId    String
+  business      Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  refundNumber  String
+  saleId        String?       // exactly one of saleId/purchaseId is set – enforced in src/lib/refunds.ts, not the DB
+  sale          Sale?         @relation(fields: [saleId], references: [id], onDelete: SetNull)
+  purchaseId    String?
+  purchase      Purchase?     @relation(fields: [purchaseId], references: [id], onDelete: SetNull)
+  amount        Decimal       @db.Decimal(14, 2)
+  method        RefundMethod
+  reason        String
+  cashAccountId String?       // set only when method = CASH – which account the money left/entered
+  cashAccount   CashAccount?  @relation(fields: [cashAccountId], references: [id], onDelete: SetNull)
+  processedById String
+  createdAt     DateTime      @default(now())
+
+  @@unique([businessId, refundNumber])
+  @@index([businessId])
+  @@index([saleId])
+  @@index([purchaseId])
+}
+
+// ----------------------------------------------------------------------------
+// CREDIT NOTES (Module 43)
+//
+// Closes the KNOWN LIMITATION Module 42 documented: a return from a closed
+// period needed an Owner reopen, because refunds in this app follow a VOID and a
+// sale in a closed period can't be voided. A credit note is dated NOW (always in
+// the open period), points at ONE sale, and reverses only what is being
+// credited: some or all of its lines, or a price adjustment on a line.
+//
+//   * Sale.total / Sale.amountPaid never change. Only Sale.balance moves, by
+//     `appliedToBalance` (the part of the credit that fits inside what the
+//     customer still owes). Everything else about a credit is a NEW ROW here.
+//   * The rest of the credit (`settledAmount`, what the customer had already
+//     paid) is handed back in CASH or kept as CUSTOMER_CREDIT that the existing
+//     credit redemption (src/lib/credits.ts) spends on a later sale.
+//   * The VAT return counts a credit note in the period of `issuedAt`, so a
+//     March sale credited in April reduces April's output VAT, matching the
+//     ledger entry (Dr VAT Output Payable, dated April). March never changes.
+//   * No edit and no void: see the README for why and for the correction path.
+// ----------------------------------------------------------------------------
+
+enum CreditNoteSettlement {
+  NONE            // the credit fits inside what the customer still owed on the sale; nothing to hand back
+  CASH            // the part the customer had already paid goes back out of a cash/bank/mobile-money account
+  CUSTOMER_CREDIT // the part the customer had already paid is kept as credit they can spend on a later sale
+}
+
+model CreditNote {
+  id               String               @id @default(cuid())
+  businessId       String
+  business         Business             @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  branchId         String?              // snapshot of Sale.branchId at issue time (same reasoning as Payroll.branchId, Module 29)
+  branch           Branch?              @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  creditNoteNumber String               // CN-000001
+  saleId           String
+  sale             Sale                 @relation(fields: [saleId], references: [id], onDelete: Restrict)
+  customerId       String?              // snapshot of Sale.customerId; null = walk-in sale
+  customer         Customer?            @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  issuedAt         DateTime             @default(now()) // ALWAYS now: the VAT return and every report count it in this instant's period
+  reason           String
+
+  // Money, all kwacha. netAmount + vatAmount = total.
+  netAmount        Decimal              @db.Decimal(14, 2) // revenue reversed, after this credit's share of the sale-level discount
+  discountShare    Decimal              @default(0) @db.Decimal(14, 2) // the part of Sale.discount handed back with this credit (already inside netAmount)
+  vatAmount        Decimal              @default(0) @db.Decimal(14, 2)
+  total            Decimal              @db.Decimal(14, 2)
+  appliedToBalance Decimal              @default(0) @db.Decimal(14, 2) // reduces Sale.balance
+  settledAmount    Decimal              @default(0) @db.Decimal(14, 2) // total - appliedToBalance: money back, or customer credit
+  settlement       CreditNoteSettlement @default(NONE)
+  cashAccountId    String?              // set only when settlement = CASH
+  cashAccount      CashAccount?         @relation(fields: [cashAccountId], references: [id], onDelete: SetNull)
+  costRestored     Decimal              @default(0) @db.Decimal(14, 2) // cost of goods put back into stock (Dr Inventory / Cr COGS)
+
+  createdById      String
+  createdAt        DateTime             @default(now())
+
+  lines CreditNoteLine[]
+
+  @@unique([businessId, creditNoteNumber])
+  @@index([businessId])
+  @@index([businessId, issuedAt])
+  @@index([saleId])
+  @@index([customerId])
+}
+
+model CreditNoteLine {
+  id           String      @id @default(cuid())
+  creditNoteId String
+  creditNote   CreditNote  @relation(fields: [creditNoteId], references: [id], onDelete: Cascade)
+  saleItemId   String
+  saleItem     SaleItem    @relation(fields: [saleItemId], references: [id], onDelete: Restrict)
+  quantity     Decimal     @db.Decimal(14, 3) // units returned; 0 for a pure price adjustment
+  restock      Boolean     @default(false)    // true = the units went back on the shelf (stock moves, cost is reversed)
+  net          Decimal     @db.Decimal(14, 2) // comparable to SaleItem.total: net of the LINE discount, before the sale-level share
+  vatAmount    Decimal     @default(0) @db.Decimal(14, 2)
+  vatCategory  VatCategory // snapshot of SaleItem.vatCategory, so the VAT return can group without a join
+  unitCost     Decimal     @db.Decimal(14, 2) // snapshot of SaleItem.unitCost, used to reverse cost when restock is true
+
+  @@index([creditNoteId])
+  @@index([saleItemId])
+}
+
+// ----------------------------------------------------------------------------
+// SUPPLIER DEBIT NOTES (Module 44)
+//
+// The purchase-side mirror of CreditNote above: a document dated today that points at one
+// purchase and gives part of it back to the supplier – goods actually sent back, or a price
+// adjustment the supplier agreed to, or both. Purchase.total/amountPaid never change, only
+// Purchase.balance moves. See src/lib/debit-notes.ts for the full design reasoning (it mirrors
+// src/lib/credit-notes.ts's numbered design choices almost exactly); the one structural
+// difference is that Purchase has no discount field, so there is no discount-share math here,
+// and Purchase posts as ONE combined journal entry (unlike Sale's two-entry split), so a debit
+// note does too – see postJournalEntryForDebitNote in src/lib/accounting-integrations.ts.
+// ----------------------------------------------------------------------------
+
+enum DebitNoteSettlement {
+  NONE            // the debit fits inside what we still owed the supplier; nothing to collect
+  CASH            // the part we had already paid comes back into a cash/bank/mobile-money account
+  SUPPLIER_CREDIT // the part we had already paid is kept as credit to spend on a later purchase – same pool
+                  // src/lib/credits.ts already redeems for a CREDIT_NOTE-sourced supplier credit
+}
+
+model SupplierDebitNote {
+  id              String              @id @default(cuid())
+  businessId      String
+  business        Business            @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  branchId        String?             // snapshot of Purchase.branchId at issue time
+  branch          Branch?             @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  debitNoteNumber String              // DBN-000001
+  purchaseId      String
+  purchase        Purchase            @relation(fields: [purchaseId], references: [id], onDelete: Restrict)
+  supplierId      String              // snapshot of Purchase.supplierId (always set – unlike Sale.customerId)
+  supplier        Supplier            @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  issuedAt        DateTime            @default(now()) // ALWAYS now – same period-close reasoning as CreditNote
+  reason          String
+
+  // Money, all kwacha. netAmount + vatAmount = total.
+  netAmount        Decimal              @db.Decimal(14, 2) // inventory cost basis reversed
+  vatAmount        Decimal              @default(0) @db.Decimal(14, 2) // input VAT no longer reclaimable
+  total            Decimal              @db.Decimal(14, 2)
+  appliedToBalance Decimal              @default(0) @db.Decimal(14, 2) // reduces Purchase.balance
+  settledAmount    Decimal              @default(0) @db.Decimal(14, 2) // total - appliedToBalance: cash back, or supplier credit
+  settlement       DebitNoteSettlement  @default(NONE)
+  cashAccountId    String?              // set only when settlement = CASH
+  cashAccount      CashAccount?         @relation(fields: [cashAccountId], references: [id], onDelete: SetNull)
+
+  createdById      String
+  createdAt        DateTime             @default(now())
+
+  lines SupplierDebitNoteLine[]
+
+  @@unique([businessId, debitNoteNumber])
+  @@index([businessId])
+  @@index([businessId, issuedAt])
+  @@index([purchaseId])
+  @@index([supplierId])
+}
+
+model SupplierDebitNoteLine {
+  id             String            @id @default(cuid())
+  debitNoteId    String
+  debitNote      SupplierDebitNote @relation(fields: [debitNoteId], references: [id], onDelete: Cascade)
+  purchaseItemId String
+  purchaseItem   PurchaseItem      @relation(fields: [purchaseItemId], references: [id], onDelete: Restrict)
+  quantity       Decimal           @db.Decimal(14, 3) // units sent back to the supplier; 0 for a pure price adjustment
+  // Module 44 naming note: NOT called "restock" like CreditNoteLine – the direction is reversed.
+  // true = these units actually left our stock and went back to the supplier (Product.quantity/
+  // StockLevel decrease). false = a price adjustment the supplier agreed to without goods moving
+  // (e.g. a billing correction) – inventory's cost basis still falls (see the model comment above),
+  // stock quantity does not.
+  stockOut       Boolean           @default(false)
+  net            Decimal           @db.Decimal(14, 2) // comparable to PurchaseItem.total
+  vatAmount      Decimal           @default(0) @db.Decimal(14, 2)
+  vatCategory    VatCategory       // snapshot of PurchaseItem.vatCategory
+  unitCost       Decimal           @db.Decimal(14, 2) // snapshot of PurchaseItem.unitCost, informational only
+
+  @@index([debitNoteId])
+  @@index([purchaseItemId])
+}
+
+// ----------------------------------------------------------------------------
+// CREDIT REDEMPTION (Module 17)
+//
+// Closes the KNOWN LIMITATION flagged in Module 16 (src/lib/refunds.ts) and
+// the older one in Module 3 (src/lib/customers.ts): a customer/supplier can
+// end up with standing credit two different ways – a CREDIT_NOTE refund, or
+// simply overpaying past every open balance – and until now neither could
+// ever be spent against a later sale/purchase; it just sat there forever as
+// a number on a profile page.
+//
+// A CreditRedemption row is the audit trail of one "spend" of that credit
+// against one specific Sale or Purchase. Nothing is ever mutated on the
+// original Refund or unlinked Payment row to mark it "used" – same
+// computed-live philosophy as every balance in this app (see the Customer
+// model comment): src/lib/credits.ts sums CreditRedemption rows against the
+// gross credit total to get what's still available, the same way Refund
+// rows net against a Sale/Purchase's amountPaid in src/lib/refunds.ts.
+//
+// sourceType matters because the two credit sources are already sitting in
+// different GL accounts for different reasons:
+//   OVERPAYMENT  – the excess already posted as Dr Cash / Cr Accounts
+//                  Receivable when it was collected (see
+//                  postJournalEntryForPayment). Spending it against a new
+//                  sale's AR needs no further GL entry – the AR account
+//                  already nets out correctly once the new sale's own Dr AR
+//                  entry exists alongside it.
+//   CREDIT_NOTE  – sitting in the dedicated CUSTOMER_CREDITS_PAYABLE /
+//                  SUPPLIER_CREDITS_RECEIVABLE accounts Module 16 created.
+//                  Spending it is a real reclassification (liability/asset
+//                  -> receivable/payable) and needs its own journal entry –
+//                  see postJournalEntryForCreditRedemption in
+//                  src/lib/accounting-integrations.ts.
+// ----------------------------------------------------------------------------
+
+enum CreditSourceType {
+  OVERPAYMENT // an unlinked Payment (saleId/purchaseId null) that exceeded every open balance at the time
+  // A Refund with method = CREDIT_NOTE against a voided Sale/Purchase, OR (Module 43/44) a CreditNote/
+  // SupplierDebitNote settled as CUSTOMER_CREDIT/SUPPLIER_CREDIT – all three sit in the same GL account
+  // (Customer Credits Payable / Supplier Credits Receivable) and are spent from the same pool.
+  CREDIT_NOTE
+}
+
+model CreditRedemption {
+  id          String           @id @default(cuid())
+  businessId  String
+  business    Business         @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  customerId  String?          // exactly one of customerId/supplierId is set – enforced in src/lib/credits.ts, not the DB
+  customer    Customer?        @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  supplierId  String?
+  supplier    Supplier?        @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  sourceType  CreditSourceType
+  saleId      String?          // exactly one of saleId/purchaseId is set, matching whichever side (customer/supplier) this is
+  sale        Sale?            @relation(fields: [saleId], references: [id], onDelete: SetNull)
+  purchaseId  String?
+  purchase    Purchase?        @relation(fields: [purchaseId], references: [id], onDelete: SetNull)
+  amount      Decimal          @db.Decimal(14, 2)
+  createdById String
+  createdAt   DateTime         @default(now())
+
+  @@index([businessId])
+  @@index([customerId])
+  @@index([supplierId])
+  @@index([saleId])
+  @@index([purchaseId])
+}
+
+// ----------------------------------------------------------------------------
+// EMPLOYEES & PAYROLL (Module 10) – spec sections 17-19
+//
+// Tax rates are explicitly required NOT to be hard-coded (spec section 18).
+// TaxConfiguration stores PAYE bands as data (a JSON array of {min, max,
+// rate}) per business, editable from a settings page – see
+// src/lib/payroll.ts::computePAYE, which reads this table rather than
+// having percentages baked into code. Seeded with clearly-labeled EXAMPLE
+// bands at business registration, not real current Malawi Revenue
+// Authority figures – this app is not the source of truth for tax law, and
+// every payroll/tax screen carries a disclaimer to that effect (spec
+// section 19 requires exactly this disclaimer).
+// ----------------------------------------------------------------------------
+
+// Module 29: gives Employee a home branch, closing the gap
+// src/lib/cashbook.ts::postCashTransactionForPayroll has named since Module
+// 27 ("Employee (and therefore Payroll) has no branchId yet"). Nullable/
+// lazy-backfill, the same pattern as Sale/Purchase/Expense.branchId – an
+// employee hired before this module, or one genuinely not tied to one
+// branch (e.g. head-office-only admin staff), just stays unattributed.
+// Unlike Product's opening-stock branchId (a one-time fact about where
+// stock arrived), an employee's branch is an ongoing attribute of the
+// employee – it CAN be changed later (a real transfer between branches),
+// so it stays editable in employeeUpdateSchema rather than being dropped
+// the way productUpdateSchema drops branchId.
+model Employee {
+  id           String    @id @default(cuid())
+  businessId   String
+  business     Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  branchId     String?
+  branch       Branch?   @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  employeeCode String    // business-facing ID, e.g. "EMP-000001" – see nextEmployeeNumber on Business
+  name         String
+  phone        String?
+  email        String?
+  position     String
+  department   String?
+  monthlySalary Decimal  @db.Decimal(14, 2) // gross, before allowances/deductions
+  startDate    DateTime
+  bankName     String?
+  bankAccountNumber String? // last-4-masked in UI displays; full value only ever sent to the authenticated employer, never to Claude or any third party
+  taxpayerId   String?  // employee's own TIN, distinct from Business.taxpayerId
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  payrollRuns Payroll[]
+
+  @@unique([businessId, employeeCode])
+  @@index([businessId])
+  @@index([businessId, branchId])
+}
+
+model TaxConfiguration {
+  id                    String   @id @default(cuid())
+  businessId            String   @unique
+  business              Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  payeBands             Json     // [{ min: number, max: number | null, rate: number }, ...] – see src/lib/payroll.ts for the typed shape
+  pensionEmployeeRate   Decimal  @default(0) @db.Decimal(5, 2) // percent, e.g. 5.00
+  pensionEmployerRate   Decimal  @default(0) @db.Decimal(5, 2)
+  vatStandardRate       Decimal  @default(16.5) @db.Decimal(5, 2) // Module 18 – percent applied to STANDARD-category lines when Business.vatRegistered is true. Reuses isExample below rather than a second flag: one Tax Settings review covers PAYE, pension AND VAT.
+  // Module 19 (Withholding Tax): [{ category: WithholdingTaxCategory, rate: number }, ...] –
+  // one entry per WithholdingTaxCategory value, percent. Same "flat rate per
+  // category" shape as payeBands is "progressive bands per income range" –
+  // simpler here because MRA withholding tax isn't progressive, it's a flat
+  // percentage per payment type. See src/lib/withholding-tax.ts for the
+  // typed shape and src/lib/payroll.ts::EXAMPLE_WITHHOLDING_TAX_RATES for
+  // the seeded placeholder values. Shares isExample below – one Tax
+  // Settings review now covers PAYE, pension, VAT, AND withholding tax.
+  // Nullable (unlike payeBands, present since Module 1) because this field
+  // was added to an already-populated table – see
+  // getOrCreateTaxConfiguration() in src/lib/payroll.ts for the lazy
+  // backfill that fills it in for any business that registered before
+  // Module 19, the same schema-evolution pattern getOrCreateSystemAccountId
+  // uses for the chart of accounts.
+  withholdingTaxRates   Json?
+  // Module 20 (Corporate Tax & Tax Calendar) – Malawi's standard resident
+  // company income tax rate at time of writing, seeded as an EXAMPLE like
+  // every other rate in this model (see isExample below). Unlike
+  // withholdingTaxRates this column is NOT nullable: it carries a real
+  // column @default, so a normal `prisma migrate dev` backfills every
+  // pre-existing business's row automatically – no lazy
+  // getOrCreateTaxConfiguration backfill branch needed the way Module 19
+  // needed one for withholdingTaxRates (which was added Json-nullable with
+  // no column default). See src/lib/corporate-tax.ts.
+  corporateTaxRate      Decimal  @default(30) @db.Decimal(5, 2)
+  // Module 45 (VAT Partial Exemption) – closes the KNOWN LIMITATION vat.ts has
+  // flagged since Module 18: a business making EXEMPT supplies generally can't
+  // reclaim all its input VAT, but this app used to let VAT_INPUT_RECEIVABLE
+  // accumulate in full regardless. When true (the safer default – reclaiming too
+  // much is the actual compliance risk), getVatReturn() apportions input VAT by
+  // the period's taxable-vs-exempt sales mix once exempt sales exceed
+  // vatDeMinimisPercent of total sales. An Accountant who has determined this
+  // simplified method doesn't apply to their business can turn it off here. Real
+  // column defaults (like corporateTaxRate above), so no lazy backfill branch is
+  // needed in getOrCreateTaxConfiguration – see src/lib/vat-apportionment.ts.
+  vatPartialExemptionEnabled Boolean @default(true)
+  // Percent: exempt sales at or below this share of total sales in a period
+  // don't trigger apportionment (trivial/incidental exempt sales shouldn't cost
+  // an otherwise-taxable business its input VAT). Default 0 = no relief, i.e.
+  // any exempt sales at all trigger apportionment, until an Owner/Accountant
+  // reviews and sets a real threshold for their business.
+  vatDeMinimisPercent   Decimal  @default(0) @db.Decimal(5, 2)
+  isExample             Boolean  @default(true) // true until an Owner/Accountant explicitly reviews and saves – drives the disclaimer banner
+  updatedAt             DateTime @updatedAt
+  updatedById           String?
+
+  @@index([businessId])
+}
+
+model Payroll {
+  id             String        @id @default(cuid())
+  businessId     String
+  business       Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  employeeId     String
+  employee       Employee      @relation(fields: [employeeId], references: [id], onDelete: Restrict)
+  // Module 29: snapshotted from Employee.branchId each time a DRAFT run is
+  // (re)calculated in upsertPayrollRun() – not just a join through
+  // employee – for the same reason Sale/Purchase/CashTransaction get their
+  // own branchId rather than trusting a related record's current value: if
+  // the employee is later reassigned to a different branch, past payroll
+  // runs must keep showing where they were actually attributed at the
+  // time, not silently follow the employee's new branch. Frozen the moment
+  // a run is PAID, same as every other field upsertPayrollRun refuses to
+  // touch once paid.
+  branchId       String?
+  branch         Branch?       @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  payPeriod      String        // "YYYY-MM" – one payroll row per employee per month
+  grossSalary    Decimal       @db.Decimal(14, 2)
+  allowances     Decimal       @default(0) @db.Decimal(14, 2)
+  allowanceNotes String?       // free-text breakdown until a dedicated line-items table earns its complexity
+  paye           Decimal       @db.Decimal(14, 2) // computed at run time from TaxConfiguration – see src/lib/payroll.ts
+  pensionEmployee Decimal      @default(0) @db.Decimal(14, 2)
+  pensionEmployer Decimal      @default(0) @db.Decimal(14, 2) // employer cost, not deducted from employee – tracked for the employer's own records
+  otherDeductions Decimal      @default(0) @db.Decimal(14, 2)
+  otherDeductionNotes String?
+  netSalary      Decimal       @db.Decimal(14, 2)
+  status         PayrollStatus @default(DRAFT)
+  paymentMethod  PaymentMethod?
+  paidAt         DateTime?
+  createdById    String
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  @@unique([businessId, employeeId, payPeriod])
+  @@index([businessId])
+  @@index([businessId, payPeriod])
+  @@index([businessId, branchId])
+}
+
+enum PayrollStatus {
+  DRAFT   // calculated but not yet paid – editable
+  PAID    // disbursed – posts a CashTransaction, then immutable
+}
+
+// ----------------------------------------------------------------------------
+// ACCOUNTING (Module 11) – spec section 20
+//
+// Real double-entry bookkeeping: every business event that already exists
+// (Sale, Purchase, Expense, Payroll, cash Transfer, customer/supplier
+// Payment) posts a balanced JournalEntry when this module's integration
+// runs – see src/lib/accounting.ts. Reports (Trial Balance, P&L, Balance
+// Sheet) are computed FROM these journal lines, never from ad hoc sums over
+// Sale/Expense tables directly – that's the "do not simply calculate
+// reports from unrelated UI fields" requirement in spec section 20, taken
+// literally.
+//
+// Scope, stated plainly: this is a real but simplified GL. No multi-
+// currency, no fiscal-year closing entries, no accrual adjustments beyond
+// what's modeled by existing transaction types, no accounts hierarchy
+// (parent/child accounts) beyond a flat chart. Real enough to produce a
+// correct trial balance and basic statements; not a full accounting
+// package.
+// ----------------------------------------------------------------------------
+
+enum AccountType {
+  ASSET
+  LIABILITY
+  EQUITY
+  REVENUE
+  EXPENSE
+}
+
+// Which side of the ledger increases this account's balance – determines
+// how src/lib/accounting.ts interprets a debit vs a credit for reporting.
+// ASSET/EXPENSE accounts have normalBalance DEBIT; LIABILITY/EQUITY/REVENUE
+// have normalBalance CREDIT. Stored explicitly rather than derived from
+// `type` every time, so a report never has to re-encode this mapping.
+enum NormalBalance {
+  DEBIT
+  CREDIT
+}
+
+model Account {
+  id            String        @id @default(cuid())
+  businessId    String
+  business      Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  code          String        // e.g. "1000", "4000" – conventional numbering, editable
+  name          String
+  type          AccountType
+  normalBalance NormalBalance
+  systemKey     String?       // stable lookup key for system accounts (e.g. "ACCOUNTS_RECEIVABLE") – see src/lib/chart-of-accounts.ts. NEVER edited via the accounts API; code/name can be renamed freely without breaking the posting engine
+  isSystemAccount Boolean     @default(false) // true for accounts src/lib/accounting.ts posts to automatically – protected from deletion
+  isActive      Boolean       @default(true)
+  createdAt     DateTime      @default(now())
+
+  journalLines JournalLine[]
+
+  @@unique([businessId, code])
+  @@unique([businessId, systemKey])
+  @@index([businessId])
+  @@index([businessId, type])
+}
+
+model JournalEntry {
+  id            String   @id @default(cuid())
+  businessId    String
+  business      Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  entryNumber   String
+  entryDate     DateTime @default(now())
+  description   String
+  referenceType String?  // "Sale" | "Purchase" | "Expense" | "Payroll" | "Transfer" | "Payment" | "ManualJournal" (Module 41 – see ManualJournal below) | ... – a reversal is "<Type>Reversal"
+  referenceId   String?
+  createdById   String
+  createdAt     DateTime @default(now())
+
+  lines JournalLine[]
+
+  @@unique([businessId, entryNumber])
+  @@index([businessId])
+  @@index([businessId, entryDate])
+  @@index([referenceType, referenceId])
+}
+
+// A single debit or credit line. Exactly one of debit/credit is non-zero –
+// enforced in src/lib/accounting.ts::postJournalEntry, not at the DB level
+// (Prisma/Postgres can't express "exactly one of two columns is zero" as a
+// portable column constraint without a CHECK constraint outside the DSL).
+model JournalLine {
+  id             String       @id @default(cuid())
+  journalEntryId String
+  journalEntry   JournalEntry @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
+  accountId      String
+  account        Account      @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  debit          Decimal      @default(0) @db.Decimal(14, 2)
+  credit         Decimal      @default(0) @db.Decimal(14, 2)
+  description    String?
+
+  @@index([journalEntryId])
+  @@index([accountId])
+}
+
+// ----------------------------------------------------------------------------
+// FIXED ASSETS & DEPRECIATION (Module 21)
+//
+// Closes the gap Module 20's own writeup named explicitly: "no concept of
+// [capital allowances], no fixed-asset/capital-allowance schedule anywhere."
+// A FixedAsset row is the register entry (cost, useful life, method);
+// depreciation itself is never stored as a running total on this row (see
+// the "computed-never-stored" project convention) – it's derived from the
+// actual JournalEntry rows a depreciation run posts, via
+// src/lib/fixed-assets.ts::getAccumulatedDepreciation. This mirrors how
+// Customer/Supplier balances are computed from Sale/Purchase/Payment
+// rather than a stored column, applied to the GL instead of a subledger.
+//
+// Depreciation is NOT automatic/background – like Payroll, an
+// Owner/Accountant explicitly runs it for a period (src/lib/
+// fixed-assets.ts::postDepreciationForPeriod), which is what actually
+// posts to DEPRECIATION_EXPENSE / ACCUMULATED_DEPRECIATION. Running it
+// twice for the same asset+period is a no-op – see that function's
+// idempotency check against existing JournalEntry rows.
+// ----------------------------------------------------------------------------
+
+enum FixedAssetCategory {
+  LAND // never depreciated – usefulLifeYears is null
+  BUILDINGS
+  MOTOR_VEHICLES
+  FURNITURE_FITTINGS
+  COMPUTER_EQUIPMENT
+  MACHINERY_EQUIPMENT
+  OTHER
+}
+
+// Only STRAIGHT_LINE is actually implemented (src/lib/fixed-assets.ts).
+// Kept as an enum, not a free string, so a future reducing-balance method
+// has a real value to add rather than a string comparison to invent.
+enum DepreciationMethod {
+  STRAIGHT_LINE
+}
+
+enum FixedAssetStatus {
+  ACTIVE
+  DISPOSED
+}
+
+model FixedAsset {
+  id          String             @id @default(cuid())
+  businessId  String
+  business    Business           @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  // Optional, unlike Expense's identically-optional branchId (Module 13):
+  // an unrestricted member sees all branches' assets by default – see
+  // resolveBranchScope() in src/lib/tenant.ts, used the same way Expense
+  // uses it.
+  branchId    String?
+  branch      Branch?            @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  supplierId  String?            // optional – informational link only, doesn't post to Accounts Payable (see src/lib/fixed-assets.ts doc comment on why)
+  supplier    Supplier?          @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  name        String
+  category    FixedAssetCategory
+  description String?
+  acquisitionDate DateTime       @default(now())
+  cost            Decimal        @db.Decimal(14, 2) // capitalized cost – what was posted to FIXED_ASSETS at acquisition
+  residualValue   Decimal        @default(0) @db.Decimal(14, 2)
+  // Null/0 for a non-depreciable asset (Land is the standard example –
+  // MRA doesn't allow depreciating land, and neither does this app).
+  usefulLifeYears Int?
+  depreciationMethod DepreciationMethod @default(STRAIGHT_LINE)
+  // The PaymentMethod actually used to pay for the asset – mirrors
+  // Expense.paymentMethod. Like Payroll (see accounting-integrations.ts),
+  // CREDIT is rejected at acquisition: this app has no
+  // "asset financed on account" concept, and Accounts Payable is
+  // specifically the Supplier/Purchase (inventory) ledger – see the
+  // KNOWN LIMITATION in this module's README section.
+  paymentMethod   PaymentMethod
+  status          FixedAssetStatus @default(ACTIVE)
+  disposalDate     DateTime?
+  disposalProceeds Decimal?        @db.Decimal(14, 2)
+  disposalNotes    String?
+  notes            String?
+  recordedById     String
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([businessId])
+  @@index([businessId, status])
+  @@index([businessId, branchId])
+}
+
+// ----------------------------------------------------------------------------
+// BANK RECONCILIATION (Module 22) – matches a CashAccount's book
+// transactions (Module 9's CashTransaction) against a real bank/mobile-
+// money statement, for one CashAccount and one statement period at a time.
+//
+// Two things a small business actually gets out of this that Cashbook
+// alone doesn't provide: (1) confidence the books and the bank agree, and
+// (2) catching bank-only items – charges, fees, interest – that never got
+// recorded because nothing else in this app has a reason to know about
+// them until the statement arrives. See src/lib/bank-reconciliation.ts.
+//
+// KNOWN LIMITATION, partly closed by Module 62: statement lines were
+// originally entered by hand only. Module 62 added CSV import (a generic
+// header-detecting parser, not a per-bank one – see
+// src/lib/bank-statement-csv.ts). OFX/bank-feed import is still not built.
+// ----------------------------------------------------------------------------
+
+enum BankReconciliationStatus {
+  IN_PROGRESS
+  COMPLETED
+}
+
+model BankReconciliation {
+  id         String   @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  accountId  String
+  account    CashAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  // The date printed on the statement being reconciled to – not "today".
+  // Book-side comparisons (getReconciliationSummary) use this as the
+  // as-of cutoff for which CashTransaction rows are in scope.
+  statementDate          DateTime
+  // Module 69. The FIRST day the statement covers – closes the limitation
+  // Module 64 documented (only the END date was stored, so "dated before the
+  // period" was a 92-day guess). Nullable, not backfilled: NULL = start unknown,
+  // which keeps Module 64's heuristic for that reconciliation exactly as it was.
+  // Same calendar-day-at-UTC-midnight storage as statementDate. Informational
+  // only: the books side is still cut off at statementDate, nothing here changes
+  // which transactions are in scope. Editable while IN_PROGRESS.
+  periodStart            DateTime?
+  statementEndingBalance Decimal  @db.Decimal(14, 2) // what the bank/statement says the balance is, as of statementDate
+  // Snapshotted once, when the reconciliation is opened – NOT recomputed
+  // live like everything else in this app. This is the one deliberate
+  // exception: it's an audit record of "what the books said at the
+  // moment reconciliation started", which matters even after later
+  // unrelated transactions change the live balance.
+  bookBalanceAtStart Decimal  @db.Decimal(14, 2)
+  status             BankReconciliationStatus @default(IN_PROGRESS)
+  completedAt        DateTime?
+  completedById      String?
+  // Module 48. Closes this model's own documented KNOWN LIMITATION
+  // ("a completed reconciliation can't be reopened"). Lazy-backfill
+  // nullable, like every schema change in this app. Deliberately NOT a
+  // history table: these three columns hold only the MOST RECENT reopen,
+  // the same "one field, not a log" choice Business.booksClosedThrough
+  // (Module 42) and NotificationLog's dismissedAt/dismissedById make –
+  // the full history of every reopen/complete cycle already lives in
+  // AuditLog (action "bankrecon.reopen"), queryable by entityId. On a
+  // second reopen these three simply get overwritten; nothing is lost,
+  // because nothing here was ever the system of record for history.
+  // completedAt/completedById are deliberately NOT cleared on reopen –
+  // they keep showing the most recent completion until the reconciliation
+  // is completed again, so "was this ever finished, and when" survives a
+  // reopen that hasn't been re-completed yet.
+  reopenedAt         DateTime?
+  reopenedById       String? // plain actor id, not a relation – see the comment on InAppNotification.readById for why
+  reopenReason       String?
+  // Module 54. Closes the KNOWN LIMITATION Modules 48/49 both documented
+  // the moment reopening shipped: the reason was always free text, with no
+  // way to point at which of the reconciliation's own statement lines the
+  // reopen was actually about. Plain id snapshot, same "not a relation"
+  // choice as reopenedById – null means the reopen wasn't about one
+  // specific line (a book-balance issue, a general correction). Same
+  // "most-recent-reopen-only" column as reopenedAt/reopenedById/reopenReason;
+  // every past reopen's line reference (as of the time it happened, in case
+  // the line is later deleted – see deleteBankStatementLine) lives in
+  // AuditLog's metadata instead.
+  reopenLineId       String?
+  createdById        String
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  lines BankStatementLine[]
+
+  @@index([businessId])
+  @@index([businessId, accountId])
+}
+
+enum BankStatementLineStatus {
+  UNMATCHED // not yet accounted for – the state every line starts in
+  MATCHED   // linked to an existing CashTransaction the business already recorded
+  POSTED    // a bank-only item (charge, interest) – a new CashTransaction/JournalEntry was posted for it
+  IGNORED   // deliberately excluded (e.g. a duplicate statement line) – never silent, always a conscious action
+}
+
+model BankStatementLine {
+  id               String              @id @default(cuid())
+  businessId       String
+  business         Business            @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  reconciliationId String
+  reconciliation   BankReconciliation  @relation(fields: [reconciliationId], references: [id], onDelete: Cascade)
+  accountId        String
+  account          CashAccount         @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  lineDate         DateTime
+  description      String
+  amount           Decimal             @db.Decimal(14, 2) // signed, same convention as CashTransaction.amount: positive = in, negative = out
+  status           BankStatementLineStatus @default(UNMATCHED)
+  // Set when status = MATCHED (an existing book transaction) – the unique
+  // constraint is what actually enforces "one book transaction can only
+  // settle one statement line", not application logic alone.
+  matchedTransactionId String?          @unique
+  matchedTransaction   CashTransaction? @relation(fields: [matchedTransactionId], references: [id], onDelete: SetNull)
+  createdById      String
+  createdAt        DateTime            @default(now())
+
+  @@index([businessId])
+  @@index([reconciliationId])
+  @@index([accountId])
+}
+
+// ----------------------------------------------------------------------------
+// STOCK TAKE (Module 23) – closes the gap this app's Inventory (Module 6)
+// has had since day one: InventoryMovement's ADJUSTMENT type existed for a
+// one-off manual correction, but nothing ever compared the whole catalog's
+// book quantities against a real physical count, the way Bank
+// Reconciliation (Module 22) compares the Cashbook against a real bank
+// statement. Same shape, different domain: open a count, work through
+// every line, post what's genuinely wrong, complete.
+// ----------------------------------------------------------------------------
+
+enum StockTakeStatus {
+  IN_PROGRESS
+  COMPLETED
+}
+
+enum StockTakeLineStatus {
+  PENDING // not yet counted – the state every line starts in
+  COUNTED // counted; if the count matches the book quantity there's nothing further to do, otherwise it needs POSTED or IGNORED
+  POSTED  // a genuine variance – an InventoryMovement + JournalEntry were posted to correct the books
+  IGNORED // a counted variance deliberately left unadjusted (e.g. a recount is scheduled) – never silent, always a conscious action
+}
+
+model StockTake {
+  id         String   @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  // Optional scope to one category (e.g. counting just "Beverages" today)
+  // – null means the whole active catalog. Two stock takes can run at once
+  // as long as they're different scopes; only one IN_PROGRESS take per
+  // scope at a time (see src/lib/stock-take.ts::openStockTake), the same
+  // "no overlapping views of the same unmatched state" rule Module 22
+  // enforces per CashAccount.
+  categoryId String?
+  category   Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  // Module 31: which branch this take counts stock at – null means the
+  // old business-wide behavior (snapshots Product.quantity, posts through
+  // recordInventoryMovement() with no branchId). When set, lines snapshot
+  // that branch's own StockLevel.quantity instead (0 if the branch has no
+  // row yet for a product – physically counting is exactly how untagged
+  // stock first becomes branch-attributed), and posted adjustments flow
+  // through recordInventoryMovement()'s branchId path so the branch's
+  // StockLevel and the business-wide Product.quantity both move together,
+  // consistent with every other branch-scoped write in this app. Fixed at
+  // open time – not editable afterward, same immutability as
+  // Purchase.branchId, since a stock take is inherently a "where" event.
+  branchId   String?
+  branch     Branch?  @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  note       String?
+  status      StockTakeStatus @default(IN_PROGRESS)
+  completedAt DateTime?
+  completedById String?
+  // Module 49. Closes this model's own documented KNOWN LIMITATION ("a
+  // completed stock take can't be reopened") – the exact same treatment
+  // Module 48 gave BankReconciliation. Lazy-backfill nullable, and
+  // deliberately NOT a history table: these three columns hold only the
+  // MOST RECENT reopen, same "one field, not a log" choice
+  // BankReconciliation.reopenedAt/Business.booksClosedThrough make – the
+  // full history already lives in AuditLog (action "stocktake.reopen"),
+  // queryable by entityId. completedAt/completedById are deliberately NOT
+  // cleared on reopen – they keep showing the most recent completion
+  // until the stock take is completed again.
+  reopenedAt    DateTime?
+  reopenedById  String? // plain actor id, not a relation – see the comment on InAppNotification.readById for why
+  reopenReason  String?
+  // Module 54 – see the matching comment on BankReconciliation.reopenLineId
+  // for the full reasoning; same plain-id snapshot of the one StockTakeLine
+  // (if any) the reopen was about, mirrored field for field.
+  reopenLineId  String?
+  createdById   String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  lines StockTakeLine[]
+
+  @@index([businessId])
+  @@index([businessId, categoryId])
+  @@index([branchId])
+}
+
+model StockTakeLine {
+  id          String    @id @default(cuid())
+  businessId  String
+  business    Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  stockTakeId String
+  stockTake   StockTake @relation(fields: [stockTakeId], references: [id], onDelete: Cascade)
+  productId   String
+  product     Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  // Both snapshotted once, when the line is created at stock-take-open
+  // time – the same deliberate "computed, never stored" exception
+  // BankReconciliation.bookBalanceAtStart makes (see that model's
+  // comment): Product.quantity and Product.purchasePrice keep moving
+  // live (sales, purchases, price edits) while a physical count is
+  // actually happening on the shop floor, so the variance has to be
+  // measured against what the books said at the moment counting started,
+  // not whatever they say by the time someone gets around to posting it.
+  systemQuantityAtCount Decimal  @db.Decimal(14, 3)
+  unitCost              Decimal  @db.Decimal(14, 2)
+  countedQuantity       Decimal? @db.Decimal(14, 3) // null until counted
+  status                StockTakeLineStatus @default(PENDING)
+  countedById           String?
+  countedAt             DateTime?
+  createdAt             DateTime @default(now())
+
+  // One line per product per stock take – counting the same product twice
+  // in one take would just be re-counting, handled by re-recording the
+  // count on the existing line, not a second row.
+  @@unique([stockTakeId, productId])
+  @@index([businessId])
+  @@index([stockTakeId])
+  @@index([productId])
+}
+
+// ----------------------------------------------------------------------------
+// AI ASSISTANT & ANALYSIS (Module 12) – spec sections 22-23
+//
+// Findings are computed deterministically (see src/lib/ai-analysis.ts) –
+// percentage comparisons, threshold checks – NOT by asking an LLM to
+// "notice" anomalies from raw numbers. That's both more reliable and
+// cheaper than an LLM call for well-defined statistical checks. The LLM
+// (src/lib/ai-assistant.ts) is used only for the natural-language Q&A
+// assistant, where free-form questions genuinely need language
+// understanding – and even there, it only ever sees a data snapshot
+// already fetched through existing tenant-scoped functions, never given
+// direct database access.
+// ----------------------------------------------------------------------------
+
+model AIAnalysis {
+  id         String   @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  runAt      DateTime @default(now())
+  findings   Json     // array of { category, severity, message, metric? } – see src/lib/ai-analysis.ts for the typed shape
+  runById    String   // userId who triggered the run (always user-initiated, no background scheduler yet)
+
+  @@index([businessId])
+  @@index([businessId, runAt])
+}
+
+// ----------------------------------------------------------------------------
+// NOTIFICATIONS (Module 24) – spec section 24
+//
+// Four places in this codebase have, since Module 1, logged an outbound
+// email/SMS to the console instead of actually sending it (email
+// verification, password reset, team invitation, customer debt reminder –
+// see src/lib/notifications.ts for the full list). This module doesn't add
+// a fifth kind of event; it replaces the "and console.log it" half of those
+// four with a real send, through a provider that's pluggable and degrades
+// gracefully to the same console-logging behavior when unconfigured – the
+// same pattern ANTHROPIC_API_KEY already established for the AI assistant.
+// Every attempt, sent or not, is recorded here so delivery is auditable.
+// ----------------------------------------------------------------------------
+
+enum NotificationChannel {
+  EMAIL
+  SMS
+}
+
+enum NotificationStatus {
+  SENT   // handed to a real provider (Resend / Africa's Talking) and accepted
+  FAILED // a real provider was configured but the send failed – errorMessage holds why
+  LOGGED // no provider configured – this is the same console.log-only behavior Modules 1/14 shipped with, now recorded
+}
+
+// Module 76 – what Africa's Talking's DELIVERY REPORT later said about an SMS it had accepted. Kept apart
+// from NotificationStatus on purpose: SENT still means "the gateway accepted it" (Module 71) and nothing
+// that already reads status changes meaning. NULL on a row = no report received (every email, every row from
+// before this module, every console/LOGGED row, and an SMS whose report has not arrived).
+enum NotificationDeliveryState {
+  IN_PROGRESS // the gateway passed it to the network (Sent / Submitted / Buffered); not yet on the handset
+  DELIVERED   // the network confirmed it reached the handset (Success)
+  UNDELIVERED // the network gave up (Failed / Rejected); deliveryFailureReason says why when it said
+}
+
+model NotificationLog {
+  id         String   @id @default(cuid())
+  // Nullable: a password-reset email isn't scoped to one business (a user
+  // can belong to several) – same reasoning AuditLog never gets a row for
+  // that event either. Every other template (verification, invitation,
+  // debt reminder) always has a business at send time and sets this.
+  businessId String?
+  business   Business? @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  // Nullable: a team invitation's recipient usually doesn't have a User
+  // row yet – that's the whole point of the invite.
+  userId     String?
+  user       User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+  channel    NotificationChannel
+  // One of: "email_verification", "password_reset", "team_invitation",
+  // "customer_debt_reminder" – see TEMPLATE_KEYS in src/lib/notifications.ts.
+  // A free-text key rather than an enum so a future template doesn't need
+  // a migration, the same tradeoff CashTransaction.referenceType makes.
+  templateKey       String
+  recipientAddress  String   // email address or phone number actually dialed
+  subject           String?  // EMAIL only
+  body              String
+  status            NotificationStatus
+  // "resend" | "africastalking" | "console" – which code path actually ran,
+  // independent of whether it succeeded. Distinguishes "no provider
+  // configured" from "provider configured but the call to it failed".
+  providerName      String
+  errorMessage      String?
+  // What this notification was about, for tracing back from a log row –
+  // e.g. ("BusinessInvitation", invitation.id) or ("Customer", customer.id).
+  // Optional: registration's verification email has no separate entity
+  // beyond the User it's already linked to.
+  relatedEntityType String?
+  relatedEntityId   String?
+  createdAt         DateTime @default(now())
+
+  // Module 75 – automatic retry of a failed send. Every attempt is its OWN row (the log stays an
+  // append-only record of what was tried); these columns chain the attempts together. All nullable
+  // or defaulted and NOT backfilled: a FAILED row written before Module 75 has no nextRetryAt, so an
+  // old failure is never resurrected into a late message.
+  attempt        Int       @default(1)   // 1 = first try, 2 = first retry, ...
+  firstAttemptAt DateTime?               // when attempt 1 was made; carried down the chain to age-limit retries
+  retryOfId      String?                 // the FAILED row this attempt retried
+  nextRetryAt    DateTime?               // set ONLY on a FAILED row that is waiting for an automatic retry
+  retriedAt      DateTime?               // set when a retry (automatic or by a person) took this row over
+  retryNote      String?                 // why it will not be retried, or why a queued retry was dropped
+
+  // Module 76 – Africa's Talking delivery reports. All nullable, NOT backfilled (an old SMS has no message id
+  // to match a report against). `providerMessageId` is the id the gateway returned for the recipient when it
+  // accepted the send (Module 71 parsed it and threw it away); the report names the same id.
+  providerMessageId     String?
+  providerCost          String?                    // as the gateway printed it, e.g. "MWK 15.0000"
+  deliveryState         NotificationDeliveryState?
+  deliveryReportedAt    DateTime?                  // when the report that set deliveryState arrived
+  deliveryFailureReason String?                    // the gateway's own word, e.g. "UserInBlacklist"; clipped
+
+  @@index([businessId])
+  @@index([businessId, createdAt])
+  @@index([userId])
+  @@index([nextRetryAt])
+  @@index([providerMessageId])
+  @@index([businessId, deliveryState])
+}
+
+// ----------------------------------------------------------------------------
+// IN-APP NOTIFICATIONS (Module 25)
+// ----------------------------------------------------------------------------
+
+// Module 25 – spec section 24's own write-up named this as the next step:
+// "An in-app notification bell (e.g. for low stock, an overdue tax filing,
+// a subscription trial ending) is a different, additive feature". Unlike
+// NotificationLog (an immutable append-only audit trail of outbound
+// sends), rows here are mutable – a person reads or dismisses them – and
+// the three alert conditions are RE-EVALUATED on every sync
+// (src/lib/in-app-notifications.ts::syncInAppNotifications), the same
+// "computed, not appended" philosophy Reports and the Tax Calendar use,
+// but persisted here because a person needs read/dismiss state to survive
+// between visits, which a purely computed list can't hold.
+enum InAppNotificationType {
+  LOW_STOCK
+  TAX_DUE
+  TRIAL_ENDING
+  // Module 57: an IN_TRANSIT StockTransfer that's sat unconfirmed longer
+  // than src/lib/stale-transfer.ts's STALE_TRANSFER_ALERT_DAYS.
+  STALE_TRANSFER
+  // Module 74: a gateway-paid subscription nearing the end of its paid period.
+  SUBSCRIPTION_RENEWAL
+  // Module 80: one business-wide alert when services have had a leftover in Service Cost Clearing for longer
+  // than Business.serviceCostAlertDays. Condition-based; resolves itself once nothing is aged.
+  SERVICE_COST_CLEARING
+}
+
+// Declaration order matters: Postgres enums compare by declared ordinal,
+// not alphabetically, so `orderBy: { severity: "desc" }` sorts URGENT
+// first without a separate priority column.
+enum InAppNotificationSeverity {
+  INFO
+  WARNING
+  URGENT
+}
+
+model InAppNotification {
+  id         String                     @id @default(cuid())
+  businessId String
+  business   Business                   @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  type       InAppNotificationType
+  severity   InAppNotificationSeverity
+  title      String
+  body       String
+  // What this alert is about – a Product for LOW_STOCK, nothing further
+  // for TAX_DUE/TRIAL_ENDING (the dedupeKey already carries their
+  // identity). Free-text, same tradeoff as NotificationLog's pair.
+  relatedEntityType String?
+  relatedEntityId   String?
+  // Where clicking the alert in the bell should take you.
+  linkHref   String?
+  // Deterministic "what alert is this" identity so syncInAppNotifications()
+  // finds and updates the SAME row every run instead of creating
+  // duplicates – e.g. "low-stock:<productId>", "tax:VAT:March 2026",
+  // "trial-ending". Unique per business, not globally.
+  dedupeKey     String
+  isRead        Boolean   @default(false)
+  readAt        DateTime?
+  // Plain actor id, not a relation – same choice StockTake.completedById
+  // makes, to avoid a second FK path into User for a field that's only
+  // ever displayed, never joined on.
+  readById      String?
+  dismissedAt   DateTime?
+  dismissedById String?
+  // Set by the sync function once the underlying condition is no longer
+  // true (stock replenished, trial converted/cancelled) – deliberately
+  // NEVER set for TAX_DUE, which – like the Tax Calendar itself (Module
+  // 20) – has no FilingRecord table and so no "done" state to detect;
+  // dismissing is the only way to clear one. See
+  // src/lib/in-app-notifications.ts for the full read/dismiss/resolve
+  // state machine.
+  resolvedAt DateTime?
+  // Module 61: the working-estimate amount (MWK) this alert's title/body
+  // reflected the last time its content was set – currently populated only
+  // by TAX_DUE (see AlertInput.amount / resolveNotificationTransition() in
+  // src/lib/in-app-notifications.ts). Nullable because most alert types
+  // don't have a comparable "amount" at all, not because it's unknown for
+  // the ones that do; lazy-backfilled like every other Module-N-adds-a-
+  // column change (existing rows read null until their next sync).
+  amountSnapshot Decimal? @db.Decimal(14, 2)
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@unique([businessId, dedupeKey])
+  @@index([businessId, resolvedAt, dismissedAt])
+  @@index([businessId, createdAt])
+}
+
+// ----------------------------------------------------------------------------
+// TAX PAYMENTS (Module 33) – recording an actual remittance to the MRA.
+//
+// Closes the gap Modules 18, 19 and 20 each documented separately: VAT
+// output tax, withholding tax and PAYE all pile up as liabilities
+// (VAT_OUTPUT_PAYABLE / WITHHOLDING_TAX_PAYABLE / PAYE_PAYABLE) that nothing
+// in the app could ever clear – an Owner/Accountant had to hand-roll an
+// Expense or manual journal entry, which also left the Tax Calendar showing
+// the obligation as "overdue" forever (Module 20's KNOWN LIMITATION) and
+// the bell's TAX_DUE alert un-resolvable except by dismissing it (Module
+// 25's). See src/lib/tax-payments.ts.
+//
+// ONE row = one payment against one obligation period. (taxType,
+// periodKey) identifies the obligation the same way the Tax Calendar does
+// (see src/lib/tax-period.ts) – there is no separate "obligation" table,
+// since the calendar is computed, not stored. Deliberately business-wide,
+// never branch-scoped: an MRA tax is owed by the taxpayer (TIN), not by a
+// branch, so the cash movement posts branch-null (same reasoning as a
+// transfer between the business's own accounts).
+//
+// KNOWN LIMITATION: one payment per (taxType, periodKey) at a time – no
+// installments/partial payments against the same period. Void a wrong
+// payment and record the correct one instead.
+// ----------------------------------------------------------------------------
+
+enum TaxPaymentType {
+  VAT
+  PAYE
+  WITHHOLDING_TAX
+  PROVISIONAL_TAX
+  ANNUAL_INCOME_TAX
+}
+
+enum TaxPaymentStatus {
+  RECORDED
+  VOIDED // reversed in both ledgers – kept as history, never deleted
+}
+
+model TaxPayment {
+  id            String           @id @default(cuid())
+  businessId    String
+  business      Business         @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  paymentNumber String
+  taxType       TaxPaymentType
+  // See src/lib/tax-period.ts for the per-type shape ("YYYY-MM" for
+  // monthly types, "YYYY-MM-DD" of the period's first day otherwise).
+  periodKey     String
+  periodLabel   String           // snapshot of the calendar's own label at recording time
+  periodStart   DateTime
+  periodEnd     DateTime
+  paymentDate   DateTime
+  // Which real CashAccount the money left – translated to its shared GL
+  // bucket (CASH_ON_HAND/BANK/...) by CASH_ACCOUNT_KEYS when posting, the
+  // same way Refunds and Bank Reconciliation do.
+  accountId     String
+  account       CashAccount      @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  // The tax itself – what actually clears the liability. For VAT this is
+  // computed by the server from the period's VAT Return (output minus
+  // input), never typed in. Cash paid = principalAmount + penaltyAmount.
+  principalAmount Decimal        @db.Decimal(14, 2)
+  // Late-payment penalties/interest the MRA charged on top. Posts to its
+  // own expense account, and is added back when estimating corporate tax
+  // (penalties aren't deductible) – see src/lib/corporate-tax.ts.
+  penaltyAmount Decimal          @default(0) @db.Decimal(14, 2)
+  // Module 46: VAT only. true = MRA paid US money back for a net-refundable
+  // period (input VAT exceeded output VAT); principalAmount is then the
+  // refund amount received, not tax paid, and the cash leg is a RECEIPT
+  // into `account` rather than a PAYMENT out of it. Always false for every
+  // non-VAT type and for a VAT period with net payable > 0. See
+  // src/lib/tax-payments.ts for the full design note.
+  isRefund      Boolean          @default(false)
+  // VAT only: the output/input VAT this payment netted off, snapshotted
+  // from the period's VAT Return at recording time (same "snapshot what
+  // was posted" rule as SaleItem.vatAmount) so a void reverses exactly
+  // what was cleared even if sales/purchases are edited afterwards.
+  vatOutputCleared Decimal?      @db.Decimal(14, 2)
+  vatInputCleared  Decimal?      @db.Decimal(14, 2)
+  // Module 47: VAT only. The net amount folded in from earlier monthly VAT
+  // periods that had no payment recorded against them (see
+  // src/lib/vat-carry-forward.ts) – same sign convention as VAT Return's
+  // netPayable (positive = an old payable rolled into this remittance,
+  // negative = an old credit netted off it). Null/0 when nothing carried
+  // forward. Already folded into vatOutputCleared/vatInputCleared and
+  // principalAmount above; kept separately only so the payment detail page
+  // and audit trail can show it was there. periodKey range (e.g.
+  // "2026-01" or "2026-01 to 2026-03") snapshotted alongside it – the
+  // periods themselves aren't separately recorded, just their combined
+  // effect, so this string is the only record of which months contributed.
+  carryForwardApplied Decimal?   @db.Decimal(14, 2)
+  carryForwardPeriods String?
+  reference     String?          // the MRA payment/receipt reference, as printed on their receipt
+  notes         String?
+  // Module 67: which instalment this is within its (taxType, periodKey) –
+  // 1 for every payment recorded before this module and for the first
+  // payment of any period. Only PAYE/withholding/provisional/annual can
+  // have more than one (VAT's principal is computed from the return, so it
+  // stays a single payment).
+  installmentNo Int              @default(1)
+  // Module 67: true = this payment closes the period no matter what the
+  // running total says (the default, and what every pre-Module-67 row is).
+  // false = a part-payment; the period stays open until the recorded
+  // principals reach the period's figure, or a later payment is not partial.
+  settlesPeriod Boolean          @default(true)
+  status        TaxPaymentStatus @default(RECORDED)
+  // "<businessId>|<taxType>|<periodKey>" while RECORDED, null once VOIDED.
+  // Module 67: instalment 2 and later append "|<installmentNo>"; instalment 1
+  // keeps the original format so every existing row is already correct.
+  // A real DB-level "one active payment per obligation" guard: Postgres
+  // treats NULLs as distinct in a unique index, so any number of VOIDED
+  // rows can coexist while at most one RECORDED row can hold the key – the
+  // partial unique index Prisma's schema DSL can't express directly (same
+  // limitation CashAccount.isDefault's comment describes).
+  activePeriodKey String?        @unique
+  voidedAt      DateTime?
+  voidedById    String?
+  voidReason    String?
+  recordedById  String
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  @@unique([businessId, paymentNumber])
+  @@index([businessId])
+  @@index([businessId, taxType, periodKey])
+  @@index([businessId, status])
+}
+
+// ----------------------------------------------------------------------------
+// FOREIGN EXCHANGE GAINS & LOSSES (Module 39)
+//
+// The books are kept in one currency (Business.currency, MWK by default) and
+// nothing in this app converts between currencies. Before this module there
+// was also no account an exchange difference could be booked to, and no
+// journal-entry screen to book one by hand – so a business holding USD or ZAR
+// had to bury a revaluation in some unrelated account.
+//
+// A ForeignExchangeAdjustment records ONE exchange gain or loss, in the
+// business currency, against ONE CashAccount that holds (or received) foreign
+// currency, and posts it to both ledgers in one transaction:
+//
+//   gain: Dr <cash GL bucket> / Cr FOREIGN_EXCHANGE_GAIN_LOSS   (+ cashbook ADJUSTMENT in)
+//   loss: Dr FOREIGN_EXCHANGE_GAIN_LOSS / Cr <cash GL bucket>   (+ cashbook ADJUSTMENT out)
+//
+// The foreign currency itself is a MEMO (currencyCode/foreignAmount/rates): it
+// documents how the figure was reached and is never used to value anything.
+// gainLossAmount is the figure that posted, snapshotted (the same "store what
+// was posted" rule as SaleItem.vatAmount and TaxPayment.principalAmount), so a
+// void reverses exactly what was booked.
+//
+// Business-wide, branch-null: an exchange difference is a property of the
+// business's holding of foreign currency, not of one branch's trading.
+// ----------------------------------------------------------------------------
+
+enum ForeignExchangeKind {
+  REALISED    // the foreign currency was actually converted or received/paid at a different rate
+  UNREALISED  // a period-end revaluation of foreign currency still held
+}
+
+enum ForeignExchangeStatus {
+  RECORDED
+  VOIDED // reversed in both ledgers – kept as history, never deleted
+}
+
+model ForeignExchangeAdjustment {
+  id               String                @id @default(cuid())
+  businessId       String
+  business         Business              @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  adjustmentNumber String
+  adjustmentDate   DateTime
+  kind             ForeignExchangeKind
+  // The cash account whose carrying value moved. Translated to its shared GL
+  // bucket by CASH_ACCOUNT_KEYS when posting, like Refunds / Tax Payments.
+  accountId        String
+  account          CashAccount           @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  // ISO 4217-style code of the foreign currency (USD, ZAR, ...). Memo only.
+  currencyCode     String
+  // Memo: present only when the figure was worked out from rates.
+  foreignAmount    Decimal?              @db.Decimal(14, 2)
+  bookRate         Decimal?              @db.Decimal(18, 6) // business-currency units per 1 foreign unit, as carried
+  newRate          Decimal?              @db.Decimal(18, 6) // the rate applied now (closing / settlement rate)
+  // SIGNED, in the business currency: positive = gain, negative = loss.
+  gainLossAmount   Decimal               @db.Decimal(14, 2)
+  reference        String?               // e.g. the bank advice or Reserve Bank / bank rate source
+  notes            String?
+  status           ForeignExchangeStatus @default(RECORDED)
+  voidedAt         DateTime?
+  voidedById       String?
+  voidReason       String?
+  recordedById     String
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+
+  @@unique([businessId, adjustmentNumber])
+  @@index([businessId])
+  @@index([businessId, status])
+  @@index([accountId])
+}
+
+// ----------------------------------------------------------------------------
+// MANUAL JOURNAL ENTRIES (Module 41)
+//
+// The ledger's own front door. Every other JournalEntry is posted BY a module
+// (a Sale, a Payment, a Depreciation run...) and can only be undone by voiding
+// that record. Modules 18, 19, 20 and 33 all say "an Accountant books this by
+// manual journal entry" – but no screen ever existed to do it. A ManualJournal
+// is that screen's record: who posted an adjusting entry, when, why, and against
+// which supporting document.
+//
+// The lines are NOT stored here. They live in the one JournalEntry (+ JournalLines)
+// this posts via postJournalEntry(), tagged referenceType "ManualJournal" /
+// referenceId = this row's id, exactly the way ForeignExchangeAdjustment and
+// TaxPayment tag theirs. Voiding therefore reuses reverseJournalEntriesForReference
+// unchanged: an equal-and-opposite entry is posted, nothing is deleted or edited.
+//
+// totalAmount is a SNAPSHOT of the entry's total debits (the "store what was
+// posted" rule used by TaxPayment.principalAmount / ForeignExchangeAdjustment
+// .gainLossAmount), so the list can show a figure without loading every line.
+//
+// Business-wide, branch-null: the GL has no branch dimension (JournalEntry has
+// no branchId), and an adjusting entry is a property of the business's books.
+// A branch-locked member can view but not post – see src/lib/manual-journal.ts.
+//
+// Deliberately NOT allowed to touch: cash/bank/mobile-money accounts, Accounts
+// Receivable/Payable, Inventory, customer/supplier credits, Fixed Assets and
+// Accumulated Depreciation. Each of those is a GL mirror of a sub-ledger this app
+// computes from its own rows (CashTransaction, Sale.balance, Product.quantity,
+// FixedAsset...). A manual line there would make the GL disagree with the
+// sub-ledger with nothing to reconcile it – the same reason Module 39 wouldn't
+// post a receivable gain/loss without a document-level rate. See
+// src/lib/manual-journal-rules.ts.
+// ----------------------------------------------------------------------------
+
+enum ManualJournalStatus {
+  RECORDED
+  VOIDED // reversed by an equal-and-opposite entry – kept as history, never deleted
+}
+
+model ManualJournal {
+  id             String              @id @default(cuid())
+  businessId     String
+  business       Business            @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  journalNumber  String              // MJ-000001 – distinct from the JournalEntry.entryNumber the posting gets
+  entryDate      DateTime            // the date the entry is posted AS OF (start of that day in the business time zone)
+  description    String              // the narration – what this entry is and why
+  documentRef    String?             // the supporting document: voucher, invoice, bank advice, tax assessment number
+  notes          String?
+  totalAmount    Decimal             @db.Decimal(14, 2)
+  status         ManualJournalStatus @default(RECORDED)
+  voidedAt       DateTime?
+  voidedById     String?
+  voidReason     String?
+  createdById    String
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+
+  @@unique([businessId, journalNumber])
+  @@index([businessId])
+  @@index([businessId, status])
+  @@index([businessId, entryDate])
+}
+
+
+// Module 79 (Service Cost Clearing variance). A service's cost is credited to account 1210 Service Cost Clearing
+// when it is sold and debited there when the supplier's bill is recorded (Module 78). The two rarely match to the
+// tambala, and nothing cleared the difference. A settlement is the one deliberate act that does: it moves a
+// product's remaining clearing balance (or part of it) to Cost of Goods Sold, with a reason, and keeps the product
+// so the balance can be worked out per service. It stores no lines of its own: the ledger entry is tagged
+// referenceType "ServiceCostSettlement" / referenceId = this row, like ManualJournal.
+//   COST_UP   = Dr Cost of Goods Sold / Cr Service Cost Clearing  (the cost was higher than recognised)
+//   COST_DOWN = Dr Service Cost Clearing / Cr Cost of Goods Sold  (the cost was lower than recognised)
+enum ServiceCostSettlementDirection {
+  COST_UP
+  COST_DOWN
+}
+
+enum ServiceCostSettlementStatus {
+  RECORDED
+  VOIDED
+}
+
+model ServiceCostSettlement {
+  id          String                         @id @default(cuid())
+  businessId  String
+  business    Business                       @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  productId   String
+  product     Product                        @relation(fields: [productId], references: [id], onDelete: Restrict)
+  direction   ServiceCostSettlementDirection
+  amount      Decimal                        @db.Decimal(14, 2) // always positive; the direction carries the sign
+  reason      String
+  status      ServiceCostSettlementStatus    @default(RECORDED)
+  voidedAt    DateTime?
+  voidedById  String?
+  voidReason  String?
+  createdById String
+  createdAt   DateTime                       @default(now())
+
+  @@index([businessId])
+  @@index([businessId, productId])
+  @@index([businessId, status])
+}

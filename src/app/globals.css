@@ -1,0 +1,122 @@
+@import "tailwindcss";
+@config "../../tailwind.config.mjs";
+
+@layer components {
+  .input {
+    @apply w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-brand-600 focus:outline-none focus:ring-1 focus:ring-brand-600;
+  }
+  /* ERP form control (Phase 4): token colours, used with <Field>. */
+  .erp-input {
+    @apply w-full rounded border border-erp-border bg-erp-surface px-2.5 py-1.5 text-sm text-erp-text placeholder:text-erp-muted/70 focus:border-erp-primary focus:outline-none focus:ring-1 focus:ring-erp-primary;
+  }
+}
+
+/* ERP design tokens (Module 82). RGB triplets so Tailwind opacity modifiers
+   work. Components use the `erp-*` Tailwind colours, never raw hex. The dark
+   set is toggled inside the signed-in shell; the public site stays light. */
+:root {
+  --erp-bg: 244 246 248;
+  --erp-surface: 255 255 255;
+  --erp-subtle: 238 241 245;
+  --erp-border: 217 223 230;
+  --erp-text: 31 41 55;
+  --erp-muted: 100 112 128;
+  --erp-primary: 21 94 117;
+  --erp-primary-fg: 255 255 255;
+  --erp-nav: 17 36 50;
+  --erp-nav-text: 203 213 225;
+  --erp-nav-active: 30 58 78;
+  --erp-success: 21 128 61;
+  --erp-warning: 180 83 9;
+  --erp-danger: 185 28 28;
+  --erp-info: 29 78 216;
+}
+.dark {
+  --erp-bg: 15 20 26;
+  --erp-surface: 22 29 37;
+  --erp-subtle: 30 39 49;
+  --erp-border: 51 65 81;
+  --erp-text: 226 232 240;
+  --erp-muted: 148 163 184;
+  --erp-primary: 56 160 190;
+  --erp-primary-fg: 8 15 22;
+  --erp-nav: 10 15 21;
+  --erp-nav-text: 168 181 196;
+  --erp-nav-active: 24 38 52;
+  --erp-success: 74 222 128;
+  --erp-warning: 251 191 36;
+  --erp-danger: 248 113 113;
+  --erp-info: 96 165 250;
+}
+
+/* Accounting figures line up in columns. */
+.tabular { font-variant-numeric: tabular-nums; }
+
+/* Printing a receipt/payslip/report must not drag the ERP chrome along. */
+@media print {
+  .erp-chrome { display: none !important; }
+  .erp-workspace { overflow: visible !important; height: auto !important; }
+  .erp-root { display: block !important; height: auto !important; }
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+/* Landing page: scroll-reveal is progressive enhancement. Content is visible
+   by default; only when JS has marked the document do we hide-then-reveal. */
+.js-reveal .reveal {
+  opacity: 0;
+  transform: translateY(14px);
+  transition: opacity 0.7s cubic-bezier(0.22, 1, 0.36, 1), transform 0.7s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.js-reveal .reveal.is-visible {
+  opacity: 1;
+  transform: none;
+}
+
+.grid-bg {
+  background-image:
+    linear-gradient(to right, rgba(11, 26, 33, 0.045) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(11, 26, 33, 0.045) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: radial-gradient(ellipse 80% 70% at 60% 30%, #000 30%, transparent 75%);
+  -webkit-mask-image: radial-gradient(ellipse 80% 70% at 60% 30%, #000 30%, transparent 75%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  .js-reveal .reveal {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+  .animate-float,
+  .animate-rise {
+    animation: none !important;
+  }
+}
+
+
+/* Phase 16 – phones. iOS Safari zooms the page when a focused field is under 16px,
+   so form controls are 16px on small screens and keep their compact size from `sm` up. */
+@media (max-width: 639px) {
+  .erp-input,
+  .input {
+    font-size: 16px;
+    min-height: 2.5rem;
+  }
+}
+
+/* h-screen is 100vh, which on mobile browsers includes the address bar and pushes the
+   status bar off screen. Use the dynamic viewport height where the browser supports it. */
+@supports (height: 100dvh) {
+  .erp-root {
+    height: 100dvh;
+  }
+}
+
+/* Phase 17 – dark theme: native controls (select popups, date pickers, scrollbars) follow it too. */
+.dark { color-scheme: dark; }
