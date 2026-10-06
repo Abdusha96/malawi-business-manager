@@ -7,7 +7,8 @@ import { retryFailedNotifications } from "@/lib/notification-retry-run";
 
 // Module 74 – the one entry point for work that has to happen without a person looking at a page.
 // This app has no scheduler of its own (a standing choice since Depreciation); a host's cron, an
-// uptime pinger or Vercel Cron calls this URL instead, every 15 minutes to an hour:
+// uptime pinger or Vercel Cron calls this URL instead. This project's Vercel schedule
+// runs daily at 01:00 UTC (03:00 Africa/Blantyre):
 //   curl -X POST -H "Authorization: Bearer $CRON_SECRET" https://your.domain/api/cron/billing
 // It (1) asks the gateway about pending subscription and invoice payments, which is the polling
 // backstop PayChangu's docs recommend, (2) sends renewal reminders, and (3, Module 75) retries emails/SMS that failed for a temporary reason. Every step is idempotent, so

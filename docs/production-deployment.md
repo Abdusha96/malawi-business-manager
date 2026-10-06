@@ -47,16 +47,16 @@ The current schema baseline is in prisma/migrations. Use migrate deploy in produ
 
 ## 4. Schedule the background task
 
-The repo includes vercel.json with a 15-minute schedule for /api/cron/billing. Vercel sends the project variable CRON_SECRET as a Bearer authorization header. This schedule is created on production deployment; preview deployments do not run it.
+The repo includes vercel.json with a daily schedule for /api/cron/billing at 01:00 UTC (03:00 in Africa/Blantyre). Vercel sends the project variable CRON_SECRET as a Bearer authorization header. This schedule is created on production deployment; preview deployments do not run it.
 
-Vercel Hobby permits only daily cron schedules, so this 15-minute schedule requires a Vercel plan that supports minute-level cron. Check Vercel's current [Cron usage limits](https://vercel.com/docs/cron-jobs/usage-and-pricing) and [secret header behavior](https://vercel.com/docs/cron-jobs/manage-cron-jobs). If the selected host does not support this schedule, configure its scheduler to call:
+Vercel Hobby permits daily schedules, so this cadence works on Hobby. Hobby timing precision is up to an hour, so expect the call between 01:00 and 02:00 UTC (03:00 and 04:00 in Malawi). Check Vercel's current [Cron usage limits](https://vercel.com/docs/cron-jobs/usage-and-pricing) and [secret header behavior](https://vercel.com/docs/cron-jobs/manage-cron-jobs). If using another host, configure its scheduler to call:
 
 ~~~text
 POST https://YOUR_DOMAIN/api/cron/billing
 Authorization: Bearer YOUR_CRON_SECRET
 ~~~
 
-Use a 15–60 minute interval. Confirm a valid call returns HTTP 200 and an invalid/missing secret returns 401/503. The job reconciles pending gateway payments, sends renewal reminders, and retries eligible failed messages.
+Run the scheduler once per day. Confirm a valid call returns HTTP 200 and an invalid/missing secret returns 401/503. The job reconciles pending gateway payments, sends renewal reminders, and retries eligible failed messages. Payment reconciliation, renewal notices, and queued notification retries can be delayed until the next daily run.
 
 ## 5. Staging integration checks
 

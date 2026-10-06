@@ -4700,8 +4700,8 @@ webhook naming no reference of ours is now normal and triggers a throttled recon
   `channel`, `lastCheckedAt`, `refundedAmount`, `refundedAt`, `refundNote`. New: `BusinessGatewayConfig`, `SalePayLink`,
   `InvoicePayment` (same refund columns). New enum value `InAppNotificationType.SUBSCRIPTION_RENEWAL`. No new permission.
 - **Reconciliation without a scheduler.** `POST|GET /api/cron/billing` (guarded by `CRON_SECRET`, 503 until set) reconciles
-  pending subscription AND invoice payments and sends renewal reminders; call it every 15-60 minutes from the host's cron, Vercel
-  Cron or an uptime pinger. Idempotent and safe to overlap. Opening Billing also reconciles that business's recent pending
+  pending subscription AND invoice payments and sends renewal reminders; this Vercel project calls it daily at 01:00 UTC.
+  Other hosts can choose their own cadence. Idempotent and safe to overlap. Opening Billing also reconciles that business's recent pending
   payments (max 3, throttled to one look per minute each), and a reference-less webhook reconciles too. The app still runs nothing by itself.
 - **Renewal.** True auto-charge is impossible here: mobile money and the hosted card page are approved by the payer each time and
   nothing is stored to charge later. Instead: a paid period now really lapses (`requiresPayment` is set only by a confirmed
@@ -4752,9 +4752,9 @@ webhook naming no reference of ours is now normal and triggers a throttled recon
 - **Proration uses today's list price,** not what was actually paid, and a part-day is not credited.
 - **Refunds are recorded, not performed.** The operator pays the money back outside the app; invoice-payment refunds are recorded
   but do not reverse the customer Payment, the sale balance or the journal entry (use the existing refund/credit-note flow for that).
-- **The cron job needs production configuration.** `vercel.json` now schedules it every 15 minutes on Vercel. Set
-  `CRON_SECRET`; Vercel Hobby cannot run a 15-minute schedule, so use a Vercel plan with minute-level cron or configure
-  another host scheduler. Without a schedule, payment reconciliation and renewal/retry messages wait for a person to open Billing.
+- **The cron job needs production configuration.** `vercel.json` schedules it daily at 01:00 UTC (03:00 in Malawi). Set
+  `CRON_SECRET`; Vercel Hobby may invoke it up to an hour after the scheduled time. Daily runs mean payment reconciliation,
+  renewal reminders, and notification retries can wait until the next run.
 - **Invoice payments:** per-process rate limiting only; one PayChangu account per business; no receipt is generated for the
   customer beyond PayChangu's own email; the link can be paid by anyone who holds it (by design); the gateway fee is not modelled.
 - **Receipt/seller tax details** are not printed, and `APP_ENCRYPTION_KEY` loss or change means businesses must re-enter their keys.
@@ -4814,8 +4814,8 @@ duplicate"). The aim is to remove that trade, so the one thing the queue must ne
 - **A timeout is retried although the first request may have been delivered.** A dropped connection after the provider
   accepted the message looks identical to one before it. Sending twice is possible there; the first-attempt window is short
   (minutes) and only unwatched, low-harm templates are retried this way.
-- **The cron job still has to be scheduled by the host.** Retry delays are "not before", so a 15-minute schedule makes a 2-minute
-  delay about 15 minutes.
+- **The cron job still has to be scheduled by the host.** Retry delays are "not before"; with this project's daily schedule,
+  a failed message may wait up to about 24 hours for its next retry attempt.
 - **Watched sends (debt reminders, supplier/pay notices) are never retried by the queue,** only by a person.
 - Africa's Talking "accepted" is not handset delivery - **closed by Module 76** (delivery-report webhook, below); bulk SMS is still absent.
 
