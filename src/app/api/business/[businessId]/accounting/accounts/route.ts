@@ -9,6 +9,9 @@ export async function POST(req: NextRequest, props: { params: Promise<{ business
   const params = await props.params;
   const ctx = await requireApiContext(params.businessId, "accounting.manage");
   if (ctx instanceof NextResponse) return ctx;
+  if (ctx.membership.role !== "OWNER" && ctx.membership.branchId) {
+    return NextResponse.json({ error: "forbidden", message: "Chart of Accounts is managed at business level." }, { status: 403 });
+  }
 
   const parsed = accountCreateSchema.safeParse(await req.json());
   if (!parsed.success) {

@@ -44,7 +44,12 @@ export default async function AccountingPage() {
           </>
         }
       />
-      <AccountingHub businessId={membership.businessId} timeZone={resolveTimeZone(membership.business.timezone)} canRecordTaxPayments={canRecordTaxPayments} canManageAccounts={canManageAccounts && !membership.branchId} />
+      <AccountingHub
+        businessId={membership.businessId}
+        timeZone={resolveTimeZone(membership.business.timezone)}
+        canRecordTaxPayments={canRecordTaxPayments}
+        canManageAccounts={canManageAccounts && (membership.role === "OWNER" || !membership.branchId)}
+      />
     </main>
   );
 }
