@@ -139,6 +139,7 @@ export const SYSTEM_ACCOUNTS: SystemAccountDef[] = [
   // Equity
   { key: "OWNERS_EQUITY", code: "3000", name: "Owner's Equity", type: "EQUITY" },
   { key: "RETAINED_EARNINGS", code: "3100", name: "Retained Earnings", type: "EQUITY" },
+  { key: "OPENING_BALANCE_EQUITY", code: "3200", name: "Opening Balance Equity", type: "EQUITY" },
 
   // Revenue
   { key: "SALES_REVENUE", code: "4000", name: "Sales Revenue", type: "REVENUE" },

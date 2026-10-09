@@ -44,6 +44,7 @@ model User {
   auditLogs         AuditLog[]
   sentInvitations   BusinessInvitation[]
   notificationLogs  NotificationLog[]
+  importBatches     ImportBatch[]
 
   @@index([email])
   @@index([phone])
@@ -263,6 +264,7 @@ model Business {
   creditNotes         CreditNote[]
   supplierDebitNotes  SupplierDebitNote[]
   serviceCostSettlements ServiceCostSettlement[]
+  importBatches    ImportBatch[]
 
   @@index([email])
 }
@@ -606,6 +608,29 @@ model AuditLog {
   // three and is now paginated rather than a single capped read, so it runs
   // repeatedly per record instead of once – worth a dedicated index.
   @@index([businessId, entityType, entityId])
+}
+
+// Audit trail for explicitly committed migration batches. Validation details
+// are stored as JSON so each future import type can share the same history.
+model ImportBatch {
+  id            String   @id @default(cuid())
+  businessId    String
+  business      Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+  importType    String
+  filename      String
+  migrationDate DateTime
+  totalRows     Int
+  importedRows  Int
+  rejectedRows  Int
+  status        String
+  errorSummary  String?
+  errors        Json?
+  createdAt     DateTime @default(now())
+
+  @@index([businessId, createdAt])
+  @@index([userId])
 }
 
 // ----------------------------------------------------------------------------
@@ -2094,6 +2119,7 @@ model FixedAsset {
   category    FixedAssetCategory
   description String?
   acquisitionDate DateTime       @default(now())
+  openingBalanceDate DateTime?
   cost            Decimal        @db.Decimal(14, 2) // capitalized cost – what was posted to FIXED_ASSETS at acquisition
   residualValue   Decimal        @default(0) @db.Decimal(14, 2)
   // Null/0 for a non-depreciable asset (Land is the standard example –
@@ -2107,6 +2133,7 @@ model FixedAsset {
   // specifically the Supplier/Purchase (inventory) ledger – see the
   // KNOWN LIMITATION in this module's README section.
   paymentMethod   PaymentMethod
+  isOpeningBalanceImported Boolean @default(false)
   status          FixedAssetStatus @default(ACTIVE)
   disposalDate     DateTime?
   disposalProceeds Decimal?        @db.Decimal(14, 2)

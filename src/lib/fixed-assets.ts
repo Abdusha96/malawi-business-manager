@@ -262,7 +262,7 @@ function periodBounds(period: string, tz: string): { start: Date; end: Date } {
 export async function postDepreciationForPeriod(params: { businessId: string; period: string; createdById: string }) {
   const { businessId, period, createdById } = params;
   const tz = await getBusinessTimeZone(businessId);
-  const { start, end } = periodBounds(period, tz);
+  const { end } = periodBounds(period, tz);
 
   // Module 42: check the whole period BEFORE the loop. Each asset posts in its own transaction, so
   // without this a closed period would fail on the first asset (postJournalEntry refuses it), but a
@@ -303,7 +303,14 @@ export async function postDepreciationForPeriod(params: { businessId: string; pe
     }
 
     const depreciableAmount = round2(Number(asset.cost) - Number(asset.residualValue));
-    const accumulatedSoFar = await getAccumulatedDepreciation(businessId, asset.id, start);
+    // Opening depreciation for a migrated asset can be dated during this
+    // period. Read the balance as of period end (before this period's new
+    // posting) so its opening contra-asset balance caps future depreciation.
+    const accumulatedSoFar = await getAccumulatedDepreciation(businessId, asset.id, end);
+    if (asset.openingBalanceDate && end < asset.openingBalanceDate) {
+      results.push({ assetId: asset.id, assetName: asset.name, amount: 0, skipped: "before opening balance date" });
+      continue;
+    }
     const remaining = round2(depreciableAmount - accumulatedSoFar);
     if (remaining <= 0) {
       results.push({ assetId: asset.id, assetName: asset.name, amount: 0, skipped: "fully depreciated" });

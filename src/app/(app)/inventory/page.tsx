@@ -103,6 +103,7 @@ export default async function InventoryPage(
         actions={
           <>
             <Link href="/stock-transfers" className="rounded border border-erp-border px-3 py-1.5 text-sm hover:bg-erp-subtle">Stock Transfers</Link>
+            <PermissionGate perm="inventory.manage"><Link href="/data-migration?kind=PRODUCTS" className="rounded border border-erp-border px-3 py-1.5 text-sm hover:bg-erp-subtle">Import Products</Link></PermissionGate>
             <PermissionGate perm="inventory.manage">
               <Link href="/inventory/new" className="rounded bg-erp-primary px-3 py-1.5 text-sm font-medium text-erp-primary-fg hover:opacity-90">+ Add Product</Link>
             </PermissionGate>

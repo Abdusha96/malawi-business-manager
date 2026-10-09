@@ -83,6 +83,7 @@ export const NAV: NavGroup[] = [
   {
     id: "admin", label: "Settings", icon: "⚙", items: [
       { label: "Business Settings", href: "/settings/general", perm: ["business.settings.manage"] },
+      { label: "Data Migration", href: "/data-migration", perm: ["inventory.manage", "fixedassets.manage"] },
       { label: "Online Payments", href: "/settings/online-payments", perm: ["business.settings.manage"] },
       { label: "Billing", href: "/settings/billing", perm: ["business.subscription.manage"] },
       { label: "Branches", href: "/branches", perm: ["branches.manage"] },

@@ -77,6 +77,7 @@ export default async function FixedAssetsPage() {
           canManage ? (
             <>
               <DepreciationRunButton businessId={membership.businessId} timeZone={tz} />
+              <Link href="/data-migration?kind=FIXED_ASSETS" className="rounded border border-erp-border px-3 py-1.5 text-sm hover:bg-erp-subtle">Import Assets</Link>
               <Link href="/fixed-assets/new" className="rounded bg-erp-primary px-3 py-1.5 text-sm font-medium text-erp-primary-fg hover:opacity-90">
                 + Add Asset
               </Link>

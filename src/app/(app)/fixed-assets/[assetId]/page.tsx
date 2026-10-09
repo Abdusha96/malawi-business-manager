@@ -91,7 +91,7 @@ export default async function FixedAssetDetailPage(props: { params: Promise<{ as
           { label: "Useful life", value: asset.usefulLifeYears ? `${asset.usefulLifeYears} years` : "Not depreciated" },
           { label: "Annual depreciation", value: formatMoney(computeAnnualDepreciation(asset)) },
           { label: "Monthly depreciation", value: formatMoney(computeMonthlyDepreciation(asset)) },
-          { label: "Paid via", value: asset.paymentMethod.replace("_", " ") },
+          { label: asset.isOpeningBalanceImported ? "Record type" : "Paid via", value: asset.isOpeningBalanceImported ? "Opening balance import" : asset.paymentMethod.replace("_", " ") },
           { label: "Branch", value: asset.branch?.name },
           { label: "Supplier", value: asset.supplier?.name },
           { label: "Description", value: asset.description },

@@ -38,6 +38,9 @@ export async function recordInventoryMovement(params: {
   reason?: string;
   referenceType?: string;
   referenceId?: string;
+  // Optional effective timestamp for historical opening-stock migrations.
+  // Existing callers keep their current behavior and signatures.
+  occurredAt?: Date;
   createdById: string;
 }) {
   const db = params.tx ?? prisma;
@@ -117,6 +120,7 @@ export async function recordInventoryMovement(params: {
         referenceType: params.referenceType,
         referenceId: params.referenceId,
         createdById: params.createdById,
+        ...(params.occurredAt ? { createdAt: params.occurredAt } : {}),
       },
     });
 
